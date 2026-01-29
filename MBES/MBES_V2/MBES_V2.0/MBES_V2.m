@@ -1,0 +1,652 @@
+%% 使用Field II和USTB计算多波束测深声纳(MBES)数据集并进行波束形成
+%
+% 本示例展示如何使用Field II创建标准船载多波束测深声纳(MBES)仿真,
+% 并将数据存储到USTB的channel_data对象中,然后使用USTB例程进行波束形成。
+% 
+% 主要功能:
+% - 使用Mills Cross正交双阵列配置(发射阵+接收阵)
+% - 生成真实的海底地形散射场景
+% - 使用chirp信号进行声场仿真
+% - 跨航向多波束接收
+% - 3D海底地形重建
+
+
+%% 清除工作空间和关闭图形窗口
+
+clear all;
+close all;
+
+%% 添加必要的工具箱路径
+
+addpath(genpath("./ustb"))
+addpath(genpath("./Field_II"))
+
+%% 基本常量
+% 
+% 首先定义成像场景的基本常量,包括声速、采样频率和采样步长
+
+c0 = 1500;      % 声速 [m/s]
+fs = 10e6;      % 采样频率 [Hz]
+dt = 1/fs;      % 采样步长 [s]
+
+%% Field II 初始化
+% 
+% 初始化Field II工具箱。这需要Field II仿真程序(<field-ii.dk>)在MATLAB路径中。
+% 同时将设定的常量传递给它。
+
+field_init(0);
+set_field('c',c0);              % 声速 [m/s]
+set_field('fs',fs);             % 采样频率 [Hz]
+set_field('use_rectangles',1);  % 使用矩形阵元
+
+%% 换能器定义 - Mills Cross配置
+% 
+% MBES使用正交双阵列配置:
+% - 发射阵列: 沿跨航向(y轴)放置,形成跨航向宽扇形
+% - 接收阵列: 沿沿航向(x轴)放置,用于方位波束形成
+%
+% 坐标系: x(沿航向-船前进方向), y(跨航向-船左右), z(深度-向下)
+
+% 发射阵列参数(跨航向)
+Tx_probe = uff.linear_array();
+f0                          = 200e3;           % 换能器中心频率 [Hz]
+lambda                      = c0/f0;           % 波长 [m]
+Tx_probe.element_height     = 15e-3;           % 阵元高度 [m]
+Tx_probe.pitch              = lambda;          % 阵元间距 [m]
+kerf                        = 0.05*lambda;     % 阵元间隙 [m]
+Tx_probe.element_width      = Tx_probe.pitch-kerf; % 阵元宽度 [m]
+Tx_probe.N                  = 32;              % 发射阵元数量(跨航向)
+
+% 接收阵列参数(沿航向)
+Rx_probe = uff.linear_array();
+Rx_probe.element_height     = 15e-3;           % 阵元高度 [m]
+Rx_probe.pitch              = lambda/2;        % 接收阵间距更小,提高分辨率 [m]
+Rx_probe.element_width      = Rx_probe.pitch-kerf; % 阵元宽度 [m]
+Rx_probe.N                  = 128;             % 接收阵元数量(沿航向)
+
+pulse_duration              = 2.5;             % 脉冲持续时间 [周期]
+
+disp('========================================');
+disp('MBES换能器配置 (Mills Cross)');
+disp('========================================');
+fprintf('中心频率: %.1f kHz\n', f0/1e3);
+fprintf('波长: %.2f mm\n', lambda*1e3);
+fprintf('发射阵列(跨航向): %d 阵元\n', Tx_probe.N);
+fprintf('接收阵列(沿航向): %d 阵元\n', Rx_probe.N);
+fprintf('发射阵列长度: %.2f cm\n', Tx_probe.N*Tx_probe.pitch*1e2);
+fprintf('接收阵列长度: %.2f cm\n', Rx_probe.N*Rx_probe.pitch*1e2);
+disp('========================================');
+
+%% 海底地形参数定义
+% 定义海底地形的参数和覆盖范围
+
+% 仿真参数
+seabed_length_along = 60;      % 沿航向长度 [m]
+seabed_width_across = 100;      % 跨航向宽度 [m]
+seabed_depth_mean   = 50;       % 平均水深 [m]
+seabed_roughness    = 3;        % 海底起伏幅度 [m]
+N_seabed_scatter    = 3e4;      % 海底散射点数量
+
+% 跨航向角度范围
+across_track_angles = linspace(-60, 60, 31);  % 31个角度
+Na = length(across_track_angles);
+
+% 测线参数
+survey_start_x      = -10;      % 测线起点沿航向位置 [m]
+survey_end_x        = 10;       % 测线终点沿航向位置 [m]
+
+disp(' ');
+disp('========================================');
+disp('海底场景参数');
+disp('========================================');
+fprintf('沿航向范围: %.0f m\n', seabed_length_along);
+fprintf('跨航向范围: %.0f m\n', seabed_width_across);
+fprintf('平均水深: %.0f m\n', seabed_depth_mean);
+fprintf('海底起伏: ±%.1f m\n', seabed_roughness);
+fprintf('散射点数量: %.0f\n', N_seabed_scatter);
+disp('========================================');
+
+%% 脉冲定义
+% 
+% 使用chirp(线性调频)信号定义脉冲-回波信号。
+
+pulse = uff.pulse();
+pulse.fractional_bandwidth = 0.5;              % 相对带宽
+pulse.center_frequency = f0;                   % 中心频率 [Hz]
+BW = pulse.fractional_bandwidth * f0;          % 带宽 [Hz]
+pulse_len = 1e-3;                              % 脉冲长度 [s]
+
+% 生成chirp激励信号
+t_p = 0:dt:pulse_len;
+excitation = chirp(t_p, f0-BW/2, pulse_len, f0+BW/2) .* hamming(numel(t_p))';
+excitation = excitation - mean(excitation);    % 去除直流分量
+
+% 冲激响应(理想情况)
+impulse_response = 1;
+one_way_ir = conv(impulse_response, excitation);
+
+% 匹配滤波器(用于脉冲压缩)
+MF = conj(flipud(excitation(:)));
+two_way_ir = conv(one_way_ir, MF);
+lag = length(two_way_ir)/2 + 1;
+
+% 显示脉冲以检查延迟估计是否正确
+figure('Name', 'MBES信号分析');
+subplot(1,1,1);
+plot((0:(length(two_way_ir)-1))*dt - lag*dt, two_way_ir); 
+hold on; grid on; axis tight
+plot((0:(length(two_way_ir)-1))*dt - lag*dt, abs(hilbert(two_way_ir)), 'r', 'LineWidth', 1.5)
+plot([0 0], [min(two_way_ir) max(two_way_ir)], 'g--', 'LineWidth', 1.5);
+legend('双程脉冲', '包络', '估计延迟');
+title('Field II 双程冲激响应');
+xlabel('时间 [s]');
+ylabel('幅度');
+
+%% 孔径对象
+% 
+% 使用Field II的*xdc_linear_array*函数定义阵列几何。
+%
+% Field II默认线阵沿x轴排列,对于MBES的Mills Cross配置:
+%   - 接收阵列(沿航向): 使用默认x轴方向 ✓
+%   - 发射阵列(跨航向): 通过变换坐标系实现y轴效果
+
+% 接收阵列(沿航向,x轴方向) - 使用默认方向
+noSubAz_Rx = round(Rx_probe.element_width/(lambda/8));   % 方位向子阵元数
+noSubEl_Rx = round(Rx_probe.element_height/(lambda/8));  % 俯仰向子阵元数
+Rh = xdc_linear_array(Rx_probe.N, Rx_probe.element_width, Rx_probe.element_height, ...
+                      kerf, noSubAz_Rx, noSubEl_Rx, [0 0 Inf]); 
+
+% 发射阵列(跨航向,y轴方向)
+% Field II不支持旋转,所以通过调整聚焦坐标来实现跨航向发射效果
+noSubAz_Tx = round(Tx_probe.element_width/(lambda/8));   % 方位向子阵元数
+noSubEl_Tx = round(Tx_probe.element_height/(lambda/8));  % 俯仰向子阵元数
+Th = xdc_linear_array(Tx_probe.N, Tx_probe.element_width, Tx_probe.element_height, ...
+                      kerf, noSubAz_Tx, noSubEl_Tx, [0 0 Inf]); 
+
+% 重要说明:
+% 通过调整聚焦点的坐标(x,y互换)来实现跨航向发射效果
+% 在后续的xdc_focus调用中,会交换x和y坐标
+
+% 设置激励、冲激响应和障板:
+xdc_excitation(Th, excitation);
+xdc_impulse(Th, impulse_response);
+xdc_baffle(Th, 0);
+xdc_center_focus(Th, [0 0 0]);
+xdc_impulse(Rh, impulse_response);
+xdc_baffle(Rh, 0);
+xdc_center_focus(Rh, [0 0 0]);
+
+%% 海底地形生成
+% 
+% 生成具有真实起伏的海底地形散射点
+
+disp(' ');
+disp('正在生成海底地形...');
+
+% 计算网格点数
+Nx_seabed = round(sqrt(N_seabed_scatter * seabed_length_along / seabed_width_across));
+Ny_seabed = round(N_seabed_scatter / Nx_seabed);
+
+% 生成均匀网格
+x_seabed = linspace(-seabed_length_along/2, seabed_length_along/2, Nx_seabed);  % 沿航向
+y_seabed = linspace(-seabed_width_across/2, seabed_width_across/2, Ny_seabed); % 跨航向
+[Xg, Yg] = meshgrid(x_seabed, y_seabed);
+
+% 生成真实的海底地形(多尺度起伏)
+Zg = seabed_depth_mean + ...
+     seabed_roughness * (1.0*sin(2*pi*Xg/30) + ...           % 长波浪(沿航向)
+                         1.2*sin(2*pi*Yg/40) + ...           % 长波浪(跨航向)
+                         0.8*sin(2*pi*Xg/10) .* cos(2*pi*Yg/15) + ... % 交叉波纹
+                         0.5*randn(size(Xg)));               % 随机粗糙度
+
+% 添加一个小山丘特征
+hill_x = 0;
+hill_y = 0;
+hill_height = 15;
+hill_radius = 15;
+distance = sqrt((Xg-hill_x).^2 + (Yg-hill_y).^2);
+Zg = Zg - hill_height * exp(-(distance/hill_radius).^2);
+
+% 展开为点列表(Field II需要的格式)
+pos_seabed = [Xg(:), Yg(:), Zg(:)];  % [沿航向, 跨航向, 深度]
+
+% 设置海底散射系数(随深度和位置变化)
+amp_seabed = 0.1 + 0.2 * abs(randn(size(pos_seabed,1), 1));  % 随机散射强度
+amp_seabed = amp_seabed .* (1 + 0.3*sin(2*pi*Yg(:)/20));     % 添加横向变化
+
+disp(['海底地形生成完成: ', num2str(size(pos_seabed,1)), ' 个散射点']);
+
+%% 场景可视化
+% 
+% 显示完整的3D场景,包括海底地形和换能器位置
+
+disp('正在生成场景预览...');
+
+figure('Name', 'MBES场景预览', 'Position', [50 60 1400 700]);
+
+% 子图1: 3D视图
+subplot(2,2,1);
+scatter3(pos_seabed(1:20:end,1), pos_seabed(1:20:end,2), pos_seabed(1:20:end,3), ...
+         3, pos_seabed(1:20:end,3), 'filled'); 
+hold on;
+% 绘制换能器位置
+plot3(0, 0, 0, 'rp', 'MarkerSize', 15, 'MarkerFaceColor', 'r');
+% 绘制发射阵列方向(y轴)
+quiver3(0, 0, 0, 0, 10, 0, 'r', 'LineWidth', 2, 'MaxHeadSize', 1);
+% 绘制接收阵列方向(x轴)
+quiver3(0, 0, 0, 10, 0, 0, 'b', 'LineWidth', 2, 'MaxHeadSize', 1);
+set(gca, 'ZDir', 'reverse');
+axis equal tight; grid on;
+xlabel('沿航向 x [m]'); ylabel('跨航向 y [m]'); zlabel('深度 z [m]');
+title('3D场景视图');
+view(35, 25);
+colorbar;
+legend('海底', '换能器', 'Tx方向(y)', 'Rx方向(x)', 'Location', 'best');
+
+% 子图2: 顶视图(俯瞰海底)
+subplot(2,2,2);
+scatter(pos_seabed(1:20:end,1), pos_seabed(1:20:end,2), ...
+        3, pos_seabed(1:20:end,3), 'filled');
+hold on;
+plot(0, 0, 'rp', 'MarkerSize', 12, 'MarkerFaceColor', 'r');
+% 绘制跨航向覆盖范围
+swath_angle = 70;  % ±70度覆盖
+y_left = seabed_depth_mean * tand(-swath_angle);
+y_right = seabed_depth_mean * tand(swath_angle);
+plot([0, 0], [y_left, y_right], 'r--', 'LineWidth', 2);
+axis equal tight; grid on;
+xlabel('沿航向 x [m]'); ylabel('跨航向 y [m]');
+title('顶视图 (x-y)');
+colorbar;
+
+% 子图3: 跨航向剖面
+subplot(2,2,3);
+% 选择x=0附近的剖面
+idx_profile = abs(Xg(:)) < 2;
+scatter(pos_seabed(idx_profile,2), pos_seabed(idx_profile,3), ...
+        10, pos_seabed(idx_profile,3), 'filled');
+hold on;
+plot(0, 0, 'rp', 'MarkerSize', 12, 'MarkerFaceColor', 'r');
+set(gca, 'YDir', 'reverse');
+axis equal tight; grid on;
+xlabel('跨航向 y [m]'); ylabel('深度 z [m]');
+title('跨航向剖面 (x≈0)');
+colorbar;
+
+% 子图4: 波束覆盖图
+subplot(2,2,4);
+hold on; grid on;
+set(gca, 'ZDir', 'reverse');
+xlabel('沿航向 x [m]'); ylabel('跨航向 y [m]'); zlabel('深度 z [m]');
+title('MBES波束覆盖示意图');
+
+% 绘制发射扇形(跨航向宽扇形)
+across_angles = linspace(-swath_angle, swath_angle, 50);
+range_tx = seabed_depth_mean / cosd(swath_angle);
+% 记录第一条线的句柄作为代表
+h_tx_fan = plot3(NaN, NaN, NaN, 'b-', 'LineWidth', 0.5); % 占位符
+for angle = across_angles
+    y_beam = range_tx * sind(angle);
+    z_beam = range_tx * cosd(angle);
+    % 在循环中继续绘制，但只保存第一个句柄
+    h = plot3([0, 0], [0, y_beam], [0, z_beam], 'b-', 'LineWidth', 0.5);
+    if angle == across_angles(1)
+        h_tx_fan = h; % 保存第一条线的句柄
+    end
+end
+
+% 绘制接收波束(示例几个方向)
+beam_angles = -60:15:60;
+h_rx_beams = plot3(NaN, NaN, NaN, 'r-', 'LineWidth', 2); % 占位符
+for angle = beam_angles
+    y_beam = range_tx * sind(angle);
+    z_beam = range_tx * cosd(angle);
+    h = plot3([0, 0], [0, y_beam], [0, z_beam], 'r-', 'LineWidth', 2);
+    if angle == beam_angles(1)
+        h_rx_beams = h; % 保存第一条线的句柄
+    end
+end
+
+% 绘制稀疏海底
+h_seabed = scatter3(pos_seabed(1:50:end,1), pos_seabed(1:50:end,2), ...
+                    pos_seabed(1:50:end,3), 5, 'k.');
+% 绘制换能器
+h_transducer = plot3(0, 0, 0, 'rp', 'MarkerSize', 15, 'MarkerFaceColor', 'r');
+
+% 使用保存的句柄创建图例
+legend([h_tx_fan, h_rx_beams, h_seabed, h_transducer], ...
+       '发射扇形', '接收波束', '海底', '换能器', 'Location', 'best');
+view(3);
+axis equal;
+drawnow;
+
+
+%% 定义发射序列
+% 
+% 标准MBES使用单次宽扇形发射,这里由于Field II限制,
+% 使用多次发射来模拟不同跨航向位置的回波
+
+% 方法说明:
+% 理想情况: 1次发射 + 接收端形成多个波束
+% Field II实现: 多次发射模拟不同跨航向方向(简化方法)
+
+F_number = 1.5;         % F数
+F = 1;                  % 帧数
+
+% 跨航向角度已在前面定义
+% across_track_angles 和 Na 已设置
+
+disp(' ');
+disp('========================================');
+disp('发射参数');
+disp('========================================');
+fprintf('跨航向角度范围: %.0f° 到 %.0f°\n', across_track_angles(1), across_track_angles(end));
+fprintf('角度数量(模拟波束数): %d\n', Na);
+fprintf('F数: %.1f\n', F_number);
+disp('========================================');
+
+%% 组合所有散射点
+% 
+% 在标准MBES中,主要关注海底散射
+
+point_position = pos_seabed;
+point_amplitudes = amp_seabed;
+
+disp(['总散射点数: ', num2str(size(point_position,1))]);
+
+%% 数据采集和波束形成（增量式处理）
+% 
+% 使用增量式处理策略：
+% - 不存储完整的CPW原始数据
+% - 每个角度计算后立即进行波束形成
+% - 只保存波束形成后的结果
+% 这样可以大幅减少内存使用
+
+disp(' ');
+disp('========================================');
+disp('开始Field II仿真计算（增量式处理）');
+disp('========================================');
+
+time_start = tic;
+wb = waitbar(0, 'MBES: 正在计算跨航向波束数据...');
+
+% Hamming窗用于接收孔径加权
+win = hamming(Rx_probe.N);
+
+% 初始化波束形成后的数据（而非原始通道数据）
+% 深度轴定义
+depth_axis = linspace(seabed_depth_mean-15, seabed_depth_mean+15, 256)';
+n_depth = length(depth_axis);
+
+% 初始化波束形成图像
+bf_image = zeros(n_depth, Na);  % [深度 × 角度]
+
+% 每个角度的最大回波（用于海底检测）
+max_amplitudes = zeros(Na, 1);
+bottom_times = zeros(Na, 1);
+
+for f = 1:F
+    waitbar(0, wb, sprintf('MBES: 正在计算数据集, 第 %d 帧', f));
+    
+    for n = 1:Na
+        waitbar(n/Na, wb);
+        
+        angle = across_track_angles(n);
+        
+        % 发射阵列设置（模拟跨航向发射）
+        xdc_apodization(Th, 0, ones(1, Tx_probe.N));
+        
+        % 计算聚焦点
+        focus_depth = seabed_depth_mean;
+        focus_y_physical = focus_depth * tand(angle);
+        focus_z = focus_depth;
+        
+        xdc_focus(Th, 0, [focus_y_physical, 0, focus_z]);
+        
+        % 接收阵列设置
+        xdc_apodization(Rh, 0, ones(1, Rx_probe.N));
+        xdc_focus_times(Rh, 0, zeros(1, Rx_probe.N));
+        
+        % 执行散射计算
+        [v, t] = calc_scat_multi(Th, Rh, point_position, point_amplitudes);
+        
+        % 匹配滤波 + 加窗
+        sig_mf = zeros(size(v));
+        for m = 1:Rx_probe.N
+            tmp_sig = conv(v(:,m), MF, 'same');
+            sig_mf(:,m) = tmp_sig * win(m);
+        end
+        
+        % 立即进行波束形成（简化版DAS）
+        % 对所有接收通道求和
+        beam_signal = sum(sig_mf, 2);  % [时间 × 1]
+        
+        % 时间轴
+        time_axis = (0:size(beam_signal,1)-1) * dt + t - lag*dt;
+        
+        % 转换为深度（斜距）
+        range_axis = time_axis * c0 / 2;
+        
+        % 插值到统一深度轴
+        beam_signal_interp = interp1(range_axis, abs(beam_signal), ...
+                                      depth_axis, 'linear', 0);
+        
+        % 存储波束形成结果
+        bf_image(:, n) = beam_signal_interp;
+        
+        % 记录最大回波位置（用于海底检测）
+        [max_amp, max_idx] = max(abs(beam_signal));
+        max_amplitudes(n) = max_amp;
+        if max_idx <= length(range_axis)
+            bottom_times(n) = range_axis(max_idx);
+        else
+            bottom_times(n) = NaN;
+        end
+        
+        % 保存序列信息
+        seq(n) = uff.wave();
+        seq(n).probe = Rx_probe;
+        seq(n).source.azimuth = angle * pi/180;
+        seq(n).source.distance = Inf;
+        seq(n).sound_speed = c0;
+        seq(n).delay = -lag*dt + t;
+        
+        % 清理临时变量以释放内存
+        clear v sig_mf tmp_sig beam_signal;
+        
+        % 进度显示
+        if mod(n, 5) == 0 || n == Na
+            fprintf('  已完成: %d/%d (%.1f%%) - 内存清理完成\n', n, Na, n/Na*100);
+        end
+    end
+end
+close(wb);
+
+time_elapsed = toc(time_start);
+disp(['Field II计算完成! 用时: ', num2str(time_elapsed, '%.1f'), ' 秒']);
+
+% 归一化波束形成图像
+bf_image = bf_image / max(bf_image(:));
+
+disp(' ');
+disp('========================================');
+disp('波束形成数据统计');
+disp('========================================');
+fprintf('数据维度: [深度, 角度] = [%d, %d]\n', n_depth, Na);
+fprintf('内存占用: %.2f MB \n', ...
+        numel(bf_image)*8/1e6);
+disp('========================================');
+
+%% 扫描区域定义和成像显示
+%
+% 由于已经在计算过程中完成了波束形成,这里直接使用结果
+
+% 转换为dB显示
+bf_image_db = 20*log10(abs(bf_image) / max(abs(bf_image(:))));
+bf_image_db(bf_image_db < -60) = -60;  % 限制动态范围
+
+disp(' ');
+disp('正在生成成像结果...');
+
+% 图1: MBES成像结果
+figure('Name', 'MBES成像结果', 'Position', [100, 50, 1400, 700]);
+
+% 子图1: 波束形成图像(扇形坐标)
+subplot(1,2,1);
+imagesc(across_track_angles, depth_axis, bf_image_db);
+colormap(hot);
+colorbar;
+clim([-60 0]);
+xlabel('跨航向角度 [°]');
+ylabel('深度 [m]');
+title('MBES波束形成图像 (角度-深度)');
+set(gca, 'YDir', 'reverse');
+grid on;
+
+% 子图2: 转换为直角坐标
+subplot(1,2,2);
+% 创建网格
+[ANGLE_grid, DEPTH_grid] = meshgrid(across_track_angles*pi/180, depth_axis);
+Y_grid = DEPTH_grid .* sin(ANGLE_grid);  % 跨航向坐标
+Z_grid = DEPTH_grid .* cos(ANGLE_grid);  % 深度坐标
+
+% 显示
+pcolor(Y_grid, Z_grid, bf_image_db);
+shading interp;
+colormap(hot);
+colorbar;
+clim([-60 0]);
+xlabel('跨航向距离 [m]');
+ylabel('深度 [m]');
+title('MBES成像结果 (直角坐标)');
+axis equal tight;
+set(gca, 'YDir', 'reverse');
+grid on;
+
+%% 3D海底重建
+%
+% 使用计算过程中保存的海底检测数据
+
+disp('正在进行3D海底重建...');
+
+figure('Name', 'MBES 3D海底重建', 'Position', [100, 100, 1400, 700]);
+
+% 子图1: 波束-深度图
+subplot(2,2,1);
+imagesc(across_track_angles, depth_axis, bf_image_db);
+colormap(hot);
+colorbar;
+clim([-60 0]);
+xlabel('跨航向角度 [°]');
+ylabel('深度 [m]');
+title('波束-深度图');
+axis tight;
+set(gca, 'YDir', 'reverse');
+grid on;
+
+% 子图2: 海底检测
+subplot(2,2,2);
+% 使用已保存的bottom_times进行海底检测
+bottom_depths = bottom_times;  % 已经是深度值
+valid_idx = ~isnan(bottom_depths) & bottom_depths > 0;
+
+plot(across_track_angles(valid_idx), bottom_depths(valid_idx), ...
+     'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+hold on;
+plot(across_track_angles, seabed_depth_mean*ones(size(across_track_angles)), ...
+     'r--', 'LineWidth', 2);
+grid on;
+xlabel('跨航向角度 [°]');
+ylabel('检测深度 [m]');
+title('海底深度检测');
+legend('检测深度', '平均深度', 'Location', 'best');
+set(gca, 'YDir', 'reverse');
+axis tight;
+
+% 子图3: 3D点云
+subplot(2,2,3);
+angles_valid = across_track_angles(valid_idx);
+depths_valid = bottom_depths(valid_idx);
+
+x_bottom = zeros(size(depths_valid(:)));
+y_bottom = depths_valid(:) .* sind(angles_valid(:));
+z_bottom = depths_valid(:) .* cosd(angles_valid(:));
+
+% 使用单一颜色
+scatter3(x_bottom, y_bottom, z_bottom, 30, 'b', 'filled');
+hold on;
+plot3(0, 0, 0, 'rp', 'MarkerSize', 15, 'MarkerFaceColor', 'r');
+
+xlabel('沿航向 x [m]');
+ylabel('跨航向 y [m]');
+zlabel('深度 z [m]');
+title('3D测深点云');
+set(gca, 'ZDir', 'reverse');
+axis equal;
+grid on;
+view(35, 25);
+
+% 子图4: 与真实海底对比
+subplot(2,2,4);
+% 真实海底(x=0处的剖面)
+idx_true = abs(Xg(:)) < 2;
+plot(pos_seabed(idx_true, 2), pos_seabed(idx_true, 3), 'k.', 'MarkerSize', 3);
+hold on;
+% 重建海底
+plot(y_bottom, z_bottom, 'b.-', 'LineWidth', 2, 'MarkerSize', 10);
+xlabel('跨航向 y [m]');
+ylabel('深度 z [m]');
+title('海底重建对比');
+legend('真实海底', '重建海底', 'Location', 'best');
+set(gca, 'YDir', 'reverse');
+grid on;
+axis tight;
+
+%% 统计分析
+
+disp(' ');
+disp('========================================');
+disp('成像质量评估');
+disp('========================================');
+
+% 有效测深点
+valid_idx = ~isnan(bottom_depths) & bottom_depths > 0;
+angles_valid = across_track_angles(valid_idx) * pi/180;
+depths_valid = bottom_depths(valid_idx);
+
+% 计算覆盖宽度
+y_bottom = depths_valid .* sin(angles_valid);
+swath_width = max(y_bottom) - min(y_bottom);
+coverage_ratio = swath_width / seabed_depth_mean;
+fprintf('测线覆盖宽度: %.1f m\n', swath_width);
+fprintf('覆盖比(宽度/水深): %.2f\n', coverage_ratio);
+
+% 有效测深点数
+fprintf('有效测深点数: %d / %d (%.1f%%)\n', ...
+        sum(valid_idx), length(valid_idx), sum(valid_idx)/length(valid_idx)*100);
+
+% 内存使用统计
+memory_used = numel(bf_image) * 8 / 1e6;  % MB
+fprintf('内存使用: %.2f MB\n', memory_used);
+
+disp('========================================');
+
+%% 保存结果(可选)
+% 保存选项
+save_data = false;  % 设置为true以保存数据
+
+if save_data
+    output_filename = 'MBES_simulation_data.uff';
+    disp(' ');
+    disp(['正在保存数据到: ', output_filename]);
+    channel_data.write(output_filename, 'channel_data');
+    disp('数据保存完成!');
+end
+
+%% 处理完成
+
+disp(' ');
+disp('========================================');
+disp('MBES仿真处理完成!');
+disp('========================================');
+fprintf('总用时: %.1f 秒\n', time_elapsed);
