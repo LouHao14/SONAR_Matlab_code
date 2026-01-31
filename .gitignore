@@ -1,6 +1,26 @@
+# 忽略 Matlab 自动保存的备份文件
 *.asv
-*.mex*
-*.slxc
+
+# 忽略编译后的 MEX 文件（不同系统不通用）
+*.mexw64
+*.mexa64
+*.mexmaci64
+
+# 忽略仿真生成的巨型数据文件和图像
 *.mat
-# 如果不想上传大体积的 .rar 压缩包，也加上：
+*.fig
+*.slxc
+
+# 忽略压缩包
 *.rar
+*.zip
+
+# 忽略本地设置
+.SimulinkProject/
+
+# 忽略仿真生成的大型数据和图片
+**/data/*.mat
+**/output/*.fig
+
+# 忽略 Field_II 的临时日志和 logo 缓存
+logo_field.mat
