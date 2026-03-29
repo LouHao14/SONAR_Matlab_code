@@ -517,28 +517,180 @@ b_data_mvdr = mvdr.go();
 
 
 %% ========================================================================
-%  结果显示与对比
+%  CBF + FISTA 去卷积波束形成
+%  算法: Fast Iterative Shrinkage-Thresholding Algorithm (FISTA)
+%  参考: Beck & Teboulle (2009); Sonar sparse deconvolution beamforming
+%
+%  模型: y = H(x) + n
+%    y: CBF 包络图像 (观测值)
+%    H: 点扩散函数算子 (PSF 循环卷积)
+%    x: 待恢复的稀疏反射率图
+%    n: 噪声
+%
+%  目标函数: min_{x >= 0}  (1/2)*||H(x) - y||_F^2 + lambda*||x||_1
 % ========================================================================
 
-figure('Name', '波束形成算法对比 (DAS vs MVDR)', 'Position', [50, 100, 1200, 500], 'Color', 'w');
+disp('正在执行 CBF + FISTA 去卷积...');
 
-% --- 左图: CBF 结果 ---
-subplot(1, 2, 1);
-b_data_cbf.plot(subplot(1,2,1)); 
-title('CBF / DAS (常规)');
-colormap(hot); 
-clim([-60 0]); 
-set(gca, 'XDir', 'normal'); % 修正坐标轴方向
-xlabel('横向 X [m]'); ylabel('距离 Z [m]');
+%% Step 1: 从 CBF 波束形成数据中提取 2D 复数图像
+N_d = numel(depth_axis);    % 深度像素数: 512
+N_a = numel(azimuth_axis);  % 方位像素数: 451
 
-% --- 右图: MVDR 结果 ---
-subplot(1, 2, 2);
-b_data_mvdr.plot(subplot(1,2,2)); 
-title('MVDR / Capon (自适应)');
-colormap(hot); 
-clim([-60 0]); 
-set(gca, 'XDir', 'normal'); % 修正坐标轴方向
-xlabel('横向 X [m]'); ylabel('距离 Z [m]');
+% b_data_cbf.data 存储为 [N_pixels × N_tx], N_pixels = N_d * N_a
+% reshape 为 [深度 × 方位] 二维矩阵
+raw_cbf = b_data_cbf.data;
+data_sz = size(raw_cbf);
+if data_sz(1) == N_d && data_sz(2) == N_a
+    % 已是 2D 矩阵格式
+    cbf_complex = raw_cbf;
+elseif data_sz(1) == N_d * N_a
+    % 展平格式: [N_pixels × N_tx]
+    cbf_complex = reshape(raw_cbf(:, 1), N_d, N_a);
+else
+    % 三维格式: [N_d × N_a × N_tx]
+    cbf_complex = raw_cbf(:, :, 1);
+end
+
+cbf_env = abs(cbf_complex);                     % 包络检波
+cbf_img = cbf_env / (max(cbf_env(:)) + eps);    % 归一化至 [0, 1]
+
+%% Step 2: 估计系统点扩散函数 (PSF)
+% PSF 由阵列方向图 (方位向) 和脉冲带宽 (距离向) 共同决定
+
+% --- 方位向 PSF: Blackman 加窗的阵列方向图 ---
+% 均匀线阵 3dB 波束宽度 [rad]: 0.886 * lambda / D_array
+bw_az_rad   = 0.886 * lambda / (probe.N * probe.pitch);
+bw_az_rad   = bw_az_rad * 1.68;   % Blackman 窗主瓣展宽因子 (~1.68×)
+az_step_rad = (azimuth_axis(end) - azimuth_axis(1)) / (N_a - 1);
+% 将 FWHM 转为像素域高斯标准差
+sigma_az_px = bw_az_rad / az_step_rad / (2 * sqrt(2 * log(2)));
+
+% --- 距离向 PSF: 匹配滤波后的脉冲压缩响应 ---
+range_res_m  = c0 / (2 * BW);     % 距离分辨率 [m]
+depth_step_m = (depth_axis(end) - depth_axis(1)) / (N_d - 1);
+sigma_r_px   = range_res_m / depth_step_m / (2 * sqrt(2 * log(2)));
+sigma_r_px   = max(sigma_r_px, 0.5);  % 至少保留 0.5 像素宽
+
+fprintf('  PSF: σ_方位 = %.2f px (%.2f°),  σ_距离 = %.2f px (%.1f mm)\n', ...
+    sigma_az_px, sigma_az_px * (2*sqrt(2*log(2))) * az_step_rad * 180/pi, ...
+    sigma_r_px,  sigma_r_px  * (2*sqrt(2*log(2))) * depth_step_m * 1e3);
+
+% --- 构建 2D 高斯 PSF 核 ---
+half_w = max(ceil(4 * max(sigma_az_px, sigma_r_px)), 8);
+[gx, gy] = meshgrid(-half_w:half_w, -half_w:half_w);
+% gx: 方位向 (列方向), gy: 深度向 (行方向)
+PSF = exp(-0.5 * ((gx / sigma_az_px).^2 + (gy / sigma_r_px).^2));
+PSF = PSF / sum(PSF(:));    % 总能量归一化
+
+%% Step 3: FISTA 迭代去卷积
+% 利用 FFT 高效实现循环卷积, Lipschitz 步长自动估计
+
+lambda_fista   = 0.01;   % L1 正则化强度 (越大越稀疏)
+max_iter_fista = 200;    % 最大迭代次数
+
+% 预计算 PSF 的 FFT (循环卷积加速)
+H_fft  = fft2(PSF, N_d, N_a);   % 前向算子 FFT: H
+Ht_fft = conj(H_fft);            % 伴随算子 FFT: H^T = H^*
+L_lip  = max(abs(H_fft(:)).^2);  % Lipschitz 常数 = max |H|^2
+
+% FISTA 初始化
+x_k = cbf_img;   % 当前解, 以 CBF 图像为初始值
+z_k = x_k;       % Nesterov 外推变量
+t_k = 1;         % 动量系数
+
+fprintf('  FISTA 参数: lambda = %.4f, L = %.4e, 最大迭代 = %d\n', ...
+        lambda_fista, L_lip, max_iter_fista);
+prev_obj = inf;
+
+for k = 1:max_iter_fista
+    % 1. 前向步: 循环卷积 H * z_k
+    Hz = real(ifft2(H_fft .* fft2(z_k)));
+
+    % 2. 残差: H*z_k - y
+    residual = Hz - cbf_img;
+
+    % 3. 梯度: H^T * residual  (伴随卷积)
+    grad = real(ifft2(Ht_fft .* fft2(residual)));
+
+    % 4. 梯度下降步
+    u = z_k - grad / L_lip;
+
+    % 5. 近端算子: 软阈值 (L1 prox) + 非负投影
+    tau   = lambda_fista / L_lip;
+    x_new = max(u - tau, 0);
+
+    % 6. FISTA Nesterov 动量更新
+    t_new = (1 + sqrt(1 + 4 * t_k^2)) / 2;
+    z_k   = x_new + ((t_k - 1) / t_new) * (x_new - x_k);
+
+    % 7. 收敛检测: 目标函数相对变化 < 1e-6
+    obj_val = 0.5 * sum(residual(:).^2) + lambda_fista * sum(abs(x_new(:)));
+    rel_change = abs(prev_obj - obj_val) / (abs(prev_obj) + eps);
+    if rel_change < 1e-6 && k > 10
+        fprintf('  FISTA 收敛于第 %d 次迭代 (Δobj = %.2e)\n', k, rel_change);
+        break;
+    end
+    if mod(k, 50) == 0
+        fprintf('  迭代 %3d / %d,  代价函数 = %.6f\n', k, max_iter_fista, obj_val);
+    end
+
+    prev_obj = obj_val;
+    x_k      = x_new;
+    t_k      = t_new;
+end
+
+img_fista = x_k;   % FISTA 最终去卷积结果
+disp('FISTA 去卷积完成!');
+
+
+%% ========================================================================
+%  三路算法对比可视化: CBF / MVDR / CBF+FISTA
+% ========================================================================
+
+az_deg = azimuth_axis * (180 / pi);   % 弧度 → 度 (用于坐标轴标注)
+
+fig_cmp = figure('Name', '前视声纳成像算法三路对比 (CBF / MVDR / FISTA)', ...
+                 'Position', [50, 50, 1800, 600], 'Color', 'w');
+
+% --- 子图 1: CBF / DAS ---
+ax1 = subplot(1, 3, 1);
+b_data_cbf.plot(ax1);
+colormap(ax1, hot);
+clim([-60 0]);
+title('CBF / DAS  (常规波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
+xlabel('方位角 [°]'); ylabel('深度 [m]');
+set(ax1, 'XDir', 'normal');
+
+% --- 子图 2: MVDR / Capon ---
+ax2 = subplot(1, 3, 2);
+b_data_mvdr.plot(ax2);
+colormap(ax2, hot);
+clim([-60 0]);
+title('MVDR / Capon  (自适应波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
+xlabel('方位角 [°]'); ylabel('深度 [m]');
+set(ax2, 'XDir', 'normal');
+
+% --- 子图 3: CBF + FISTA 去卷积 ---
+ax3 = subplot(1, 3, 3);
+fista_db = 20 * log10(img_fista / (max(img_fista(:)) + eps) + eps);
+fista_db = max(fista_db, -60);        % 限制动态范围到 -60 dB
+imagesc(az_deg, depth_axis, fista_db);
+axis tight;
+colormap(ax3, hot);
+clim([-60 0]);
+colorbar;
+title('CBF + FISTA 去卷积  (稀疏正则化)', 'FontSize', 13, 'FontWeight', 'bold');
+xlabel('方位角 [°]'); ylabel('深度 [m]');
+set(ax3, 'XDir', 'normal');
+
+sgtitle('前视声纳成像算法对比  (FLS Imaging Algorithm Comparison)', ...
+        'FontSize', 15, 'FontWeight', 'bold');
+drawnow;
+
+fprintf('\n=== 前视声纳三路算法对比完成 ===\n');
+fprintf('  %-12s 旁瓣高, 分辨率受限于阵列孔径\n', 'CBF / DAS:');
+fprintf('  %-12s 自适应抑制旁瓣, 近场效果好, 计算量大\n', 'MVDR:');
+fprintf('  %-12s 稀疏去卷积, 主瓣最窄, 目标定位精度最高\n', 'FISTA:');
 
 disp('算法对比完成！');
 
