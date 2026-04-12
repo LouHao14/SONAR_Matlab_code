@@ -673,48 +673,70 @@ disp('FISTA 去卷积完成!');
 
 %% ========================================================================
 %  三路算法对比可视化: CBF / MVDR / CBF+FISTA
+%  【修正】三幅图全部使用 imagesc(az_deg, depth_axis, ...) 统一坐标系.
+%  原来 b_data.plot() 的 X 轴是物理坐标 (单位: 米), 而 FISTA 的 imagesc
+%  X 轴是方位角 (单位: 度), 两者完全不同 → 坐标系混用导致图像错位.
+%  改为从 USTB 数据对象中提取 [N_d × N_a] 矩阵后统一用 imagesc 渲染.
 % ========================================================================
 
-az_deg = azimuth_axis * (180 / pi);   % 弧度 → 度 (用于坐标轴标注)
+az_deg = azimuth_axis * (180 / pi);
+
+%% 提取 CBF 图像 (复用 Step 1 中的 cbf_img, 已是 [N_d × N_a] 归一化包络)
+cbf_db_vis = 20 * log10(cbf_img + eps);
+cbf_db_vis = max(cbf_db_vis, -60);
+
+%% 提取 MVDR 图像 (从 USTB b_data_mvdr 中读取, 与 CBF 相同格式处理)
+raw_mvdr = b_data_mvdr.data;
+sz_m     = size(raw_mvdr);
+if sz_m(1) == N_d && (numel(sz_m) < 2 || sz_m(2) == N_a)
+    mvdr_env = squeeze(double(abs(raw_mvdr)));
+elseif sz_m(1) == N_d * N_a
+    mvdr_env = reshape(abs(double(raw_mvdr(:, 1))), N_d, N_a);
+else
+    mvdr_env = squeeze(double(abs(raw_mvdr(:, :, 1))));
+end
+if ~ismatrix(mvdr_env); mvdr_env = mvdr_env(:, :, 1); end
+mvdr_img    = mvdr_env / (max(mvdr_env(:)) + eps);
+mvdr_db_vis = 20 * log10(mvdr_img + eps);
+mvdr_db_vis = max(mvdr_db_vis, -60);
+
+%% FISTA 结果转 dB
+fista_db = 20 * log10(img_fista / (max(img_fista(:)) + eps) + eps);
+fista_db = max(fista_db, -60);
+
+%% 统一坐标轴范围
+% 目标在方位 ±0.46° @ 深度 ~5 m.
+% az_lim = ±2°: 目标占视野 23%, CBF 主瓣 0.67° 清晰可见
+% depth_lim = [3.5, 6.5]: 留余量以适应 DAS 延时校准误差
+az_lim    = [-2, 2];
+depth_lim = [3.5, 6.5];
 
 fig_cmp = figure('Name', '前视声纳成像算法三路对比 (CBF / MVDR / FISTA)', ...
                  'Position', [50, 50, 1800, 600], 'Color', 'w');
 
-% 三目标位于 z=5m, x∈[-4cm, +4cm] → 方位角 ≈ ±0.46°
-% 统一坐标轴范围: 方位 ±5°, 深度 3-8 m
-% (海底在 10-18 m 处不会出现在此窗口, 画面干净, 便于分辨率对比)
-az_lim    = [-5, 5];   % 方位角显示范围 [°]
-depth_lim = [3, 8];    % 深度显示范围 [m]
-
 % --- 子图 1: CBF / DAS ---
 ax1 = subplot(1, 3, 1);
-b_data_cbf.plot(ax1);
-colormap(ax1, hot);
-clim([-60 0]);
+imagesc(az_deg, depth_axis, cbf_db_vis);
+colormap(ax1, hot); clim([-60 0]); colorbar;
 title('CBF / DAS  (常规波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
-set(ax1, 'XDir', 'normal', 'XLim', az_lim, 'YLim', depth_lim);
+set(ax1, 'XLim', az_lim, 'YLim', depth_lim);
 
 % --- 子图 2: MVDR / Capon ---
 ax2 = subplot(1, 3, 2);
-b_data_mvdr.plot(ax2);
-colormap(ax2, hot);
-clim([-60 0]);
+imagesc(az_deg, depth_axis, mvdr_db_vis);
+colormap(ax2, hot); clim([-60 0]); colorbar;
 title('MVDR / Capon  (自适应波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
-set(ax2, 'XDir', 'normal', 'XLim', az_lim, 'YLim', depth_lim);
+set(ax2, 'XLim', az_lim, 'YLim', depth_lim);
 
 % --- 子图 3: CBF + FISTA 去卷积 ---
 ax3 = subplot(1, 3, 3);
-fista_db = 20 * log10(img_fista / (max(img_fista(:)) + eps) + eps);
-fista_db = max(fista_db, -60);        % 限制动态范围到 -60 dB
 imagesc(az_deg, depth_axis, fista_db);
-colormap(ax3, hot);
-clim([-60 0]);
-colorbar;
+colormap(ax3, hot); clim([-60 0]); colorbar;
 title('CBF + FISTA 去卷积  (稀疏正则化)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
-set(ax3, 'XDir', 'normal', 'XLim', az_lim, 'YLim', depth_lim);
+set(ax3, 'XLim', az_lim, 'YLim', depth_lim);
 
 % 联动三轴: 交互缩放/平移时同步
 linkaxes([ax1, ax2, ax3], 'xy');
