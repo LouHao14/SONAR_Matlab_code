@@ -582,34 +582,80 @@ half_w = max(ceil(4 * max(sigma_az_px, sigma_r_px)), 8);
 PSF = exp(-0.5 * ((gx / sigma_az_px).^2 + (gy / sigma_r_px).^2));
 PSF = PSF / sum(PSF(:));    % 总能量归一化
 
-%% Step 3: FISTA 迭代去卷积
-% 利用 FFT 高效实现循环卷积, Lipschitz 步长自动估计
+%% Step 3: 零填充 (避免循环卷积绕回伪影)
+% 参考: EMBED (dtu-act/EMBED) zeropad 策略
+% 原始循环卷积将图像边界与对侧"接续", 产生伪影.
+% 在图像四周各填充 PSF 半宽 (pad_r / pad_a) 个零像素后再做 FISTA,
+% 收敛后裁剪回原始尺寸即得到无绕回伪影的去卷积结果.
+
+Np_r  = size(PSF, 1);          % PSF 深度方向像素数
+Np_a  = size(PSF, 2);          % PSF 方位方向像素数
+pad_r = floor(Np_r / 2);       % 深度方向单侧填充量
+pad_a = floor(Np_a / 2);       % 方位方向单侧填充量
+N_pad_d = N_d + 2 * pad_r;     % 填充后深度尺寸
+N_pad_a = N_a + 2 * pad_a;     % 填充后方位尺寸
+
+% 观测图像: 居中放入零填充矩阵
+cbf_pad = zeros(N_pad_d, N_pad_a);
+cbf_pad(pad_r+1 : pad_r+N_d, pad_a+1 : pad_a+N_a) = cbf_img;
+
+% PSF: 放入填充矩阵后 ifftshift → 将 PSF 中心移至 (1,1) (FFT 原点),
+% 保证 ifft2 后卷积结果与图像对齐, 无需在迭代内额外调用 fftshift.
+PSF_pad = zeros(N_pad_d, N_pad_a);
+PSF_pad(1:Np_r, 1:Np_a) = PSF;
+PSF_pad = ifftshift(PSF_pad);
+
+%% Step 4: 改进的 FISTA 迭代去卷积
+% 算法结构参考 EMBED (dtu-act/EMBED) 的 FISTA.m,
+% 在原始 Beck & Teboulle (2009) 框架上做如下改进:
+%   1. 零填充消除绕回伪影           (见 Step 3)
+%   2. 幂迭代精确估计 Lipschitz 常数 (EMBED lipschitz 函数, 10 次迭代)
+%   3. 目标函数历史记录              (EMBED info.obj)
+%   4. 耗时统计                      (EMBED info.time)
 
 lambda_fista   = 0.01;   % L1 正则化强度 (越大越稀疏)
 max_iter_fista = 200;    % 最大迭代次数
 
-% 预计算 PSF 的 FFT (循环卷积加速)
-H_fft  = fft2(PSF, N_d, N_a);   % 前向算子 FFT: H
-Ht_fft = conj(H_fft);            % 伴随算子 FFT: H^T = H^*
-L_lip  = max(abs(H_fft(:)).^2);  % Lipschitz 常数 = max |H|^2
+% 预计算填充后 PSF 的 FFT 及伴随 FFT
+% 对实数对称 PSF: conj(H_fft) 等价于 EMBED 的 fft2(rot90(PSF,2))
+H_fft  = fft2(PSF_pad);
+Ht_fft = conj(H_fft);
 
-% FISTA 初始化
-x_k = cbf_img;   % 当前解, 以 CBF 图像为初始值
-z_k = x_k;       % Nesterov 外推变量
-t_k = 1;         % 动量系数
+% 幂迭代估计 Lipschitz 常数 L = λ_max(H^T H)
+% 参考: EMBED/src/FISTA.m 内部 lipschitz 函数 (10 次幂迭代)
+% 零填充后算子不再是纯循环矩阵, max|H_fft|^2 可能偏高或偏低,
+% 幂迭代给出更准确的谱范数估计, 保证收敛且不过于保守.
+fprintf('  幂迭代估计 Lipschitz 常数 (10 次迭代)...\n');
+v = rand(N_pad_d, N_pad_a);
+for pi_k = 1:10
+    Av   = real(ifft2(H_fft  .* fft2(v)));
+    AtAv = real(ifft2(Ht_fft .* fft2(Av)));
+    v_norm = norm(AtAv(:));
+    if v_norm < eps; break; end
+    v = AtAv / v_norm;
+end
+L_lip = norm(real(ifft2(H_fft .* fft2(v))), 'fro')^2;
+L_lip = max(L_lip, eps);   % 防止除零
 
 fprintf('  FISTA 参数: lambda = %.4f, L = %.4e, 最大迭代 = %d\n', ...
         lambda_fista, L_lip, max_iter_fista);
-prev_obj = inf;
+
+% FISTA 初始化 (以零填充 CBF 图像为热启动)
+x_k          = cbf_pad;
+z_k          = x_k;
+t_k          = 1;
+obj_history  = nan(max_iter_fista, 1);   % 目标函数历史 (参考 EMBED info.obj)
+prev_obj     = inf;
+t_fista_start = tic;
 
 for k = 1:max_iter_fista
-    % 1. 前向步: 循环卷积 H * z_k
+    % 1. 前向卷积: H * z_k
     Hz = real(ifft2(H_fft .* fft2(z_k)));
 
     % 2. 残差: H*z_k - y
-    residual = Hz - cbf_img;
+    residual = Hz - cbf_pad;
 
-    % 3. 梯度: H^T * residual  (伴随卷积)
+    % 3. 伴随梯度: H^T * residual
     grad = real(ifft2(Ht_fft .* fft2(residual)));
 
     % 4. 梯度下降步
@@ -619,19 +665,22 @@ for k = 1:max_iter_fista
     tau   = lambda_fista / L_lip;
     x_new = max(u - tau, 0);
 
-    % 6. FISTA Nesterov 动量更新
+    % 6. FISTA Nesterov 动量更新 (参考 EMBED FISTA.m)
     t_new = (1 + sqrt(1 + 4 * t_k^2)) / 2;
     z_k   = x_new + ((t_k - 1) / t_new) * (x_new - x_k);
 
-    % 7. 收敛检测: 目标函数相对变化 < 1e-6
-    obj_val = 0.5 * sum(residual(:).^2) + lambda_fista * sum(abs(x_new(:)));
-    rel_change = abs(prev_obj - obj_val) / (abs(prev_obj) + eps);
+    % 7. 目标函数记录 & 收敛检测 (参考 EMBED info.obj)
+    % x >= 0, 故 ||x||_1 = sum(x)
+    obj_val        = 0.5 * norm(residual(:))^2 + lambda_fista * sum(x_new(:));
+    obj_history(k) = obj_val;
+    rel_change     = abs(prev_obj - obj_val) / (abs(prev_obj) + eps);
     if rel_change < 1e-6 && k > 10
         fprintf('  FISTA 收敛于第 %d 次迭代 (Δobj = %.2e)\n', k, rel_change);
+        obj_history = obj_history(1:k);
         break;
     end
     if mod(k, 50) == 0
-        fprintf('  迭代 %3d / %d,  代价函数 = %.6f\n', k, max_iter_fista, obj_val);
+        fprintf('  迭代 %3d/%d  代价函数 = %.6f\n', k, max_iter_fista, obj_val);
     end
 
     prev_obj = obj_val;
@@ -639,7 +688,12 @@ for k = 1:max_iter_fista
     t_k      = t_new;
 end
 
-img_fista = x_k;   % FISTA 最终去卷积结果
+% 耗时统计 (参考 EMBED info.time)
+t_fista_elapsed = toc(t_fista_start);
+fprintf('  FISTA 耗时: %.2f 秒\n', t_fista_elapsed);
+
+% 从零填充矩阵裁剪回原始图像尺寸
+img_fista = x_k(pad_r+1 : pad_r+N_d, pad_a+1 : pad_a+N_a);
 disp('FISTA 去卷积完成!');
 
 
