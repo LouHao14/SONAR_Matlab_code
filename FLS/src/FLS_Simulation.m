@@ -50,16 +50,10 @@ probe.N                 = 128;             % 阵元数量
 pulse_duration          = 2.5;             % 脉冲持续时间 [周期]
 
 %% 场景参数定义
-% 定义STL模型和海底地形的参数
-stl_file = fullfile(current_script_path, 'ball.stl');
-disp(['正在加载模型文件: ', stl_file]);
-% 检查文件是否存在，避免路径错误导致中断
-if ~exist(stl_file, 'file')
-    error('错误：在脚本同级目录下未找到 ball.stl 文件！请检查文件名或位置。');
-end
-stl_scale       = 0.05;        % 模型缩放比例因子(5%)
-stl_pos         = [2, 8, 6];   % 模型放置位置 [x, z, y(深度)]
-stl_rot_deg     = [0, 0, 90];  % 模型旋转角度 [roll, pitch, yaw] 度
+% 目标: 使用多个紧邻点目标以展示 CBF 与 FISTA 分辨率对比
+% CBF 方位向 3dB 波束宽度 (Blackman 加窗) ≈ 1.68×0.886×λ/D ≈ 0.666°
+%   对应 z=5m 处横向分辨率 ≈ 5.8 cm
+% 目标间距 4 cm < 5.8 cm → CBF 将三目标融合成一个宽斑, FISTA 可分辨各点
 
 % 海底地形参数
 seabed_len      = 15;          % 海底长度(z方向) [m]
@@ -125,45 +119,21 @@ xdc_impulse(Rh, impulse_response);
 xdc_baffle(Rh, 0);
 xdc_center_focus(Rh, [0 0 0]);
 
-%% STL模型处理
-% 
-% 读取并处理3D STL模型,将其转换为散射点云
+%% 目标点定义
+% 坐标格式: [x(横向/方位), y(俯仰/仰角=0 表示在扫描平面内), z(距离)] —— Field II 约定
+%
+% 3 个紧邻点目标, 间距 4 cm, 全部位于 z = 5 m 处:
+%   相邻目标角度间距 ≈ atan(0.04/5) = 0.46°  <  CBF 3dB 宽度 0.67°
+%   → CBF: 三目标融合为单个宽斑
+%   → FISTA: 去卷积后可分辨三个独立峰值
 
-disp('正在处理STL模型...');
+pos_target = [
+    -0.04,  0,  5;   % 目标 1: 左偏 4 cm, 距离 5 m
+     0.00,  0,  5;   % 目标 2: 正中,      距离 5 m
+     0.04,  0,  5;   % 目标 3: 右偏 4 cm, 距离 5 m
+];
 
-% 读取STL文件
-try
-    TR = stlread(stl_file);
-    stl_V = TR.Points;
-catch
-    [~, stl_V] = stlread(stl_file);
-end
-
-% 去除重复顶点
-[stl_V, ~, ~] = unique(stl_V, 'rows');
-
-% 体素化下采样
-voxel = 0.4;  % 体素边长 [与STL单位相同]
-minCoord = floor(min(stl_V)/voxel);
-idx = round((stl_V - minCoord*voxel)/voxel);
-[~, firstIdx] = unique(idx, 'rows', 'stable');
-stl_V = stl_V(firstIdx, :);
-
-% 缩放模型
-stl_V = stl_scale * stl_V;
-
-% 应用旋转变换
-r = stl_rot_deg;
-Rx = [1 0 0; 0 cosd(r(1)) -sind(r(1)); 0 sind(r(1)) cosd(r(1))];  % 绕x轴
-Ry = [cosd(r(2)) 0 sind(r(2)); 0 1 0; -sind(r(2)) 0 cosd(r(2))]; % 绕y轴
-Rz = [cosd(r(3)) -sind(r(3)) 0; sind(r(3)) cosd(r(3)) 0; 0 0 1]; % 绕z轴
-Rot = Rz * Ry * Rx;
-
-% 应用旋转和平移,坐标重排为[x, y(深度), z]
-pos_target = (Rot * stl_V')' + stl_pos;
-pos_target = pos_target(:, [1 3 2]);  % 重排为 [x, y, z]
-
-disp(['STL模型处理完成: ', num2str(size(pos_target,1)), ' 个散射点']);
+disp(['目标点定义完成: ', num2str(size(pos_target,1)), ' 个紧邻散射点 (间距 4 cm @ 5 m)']);
 
 %% 定义海底散射体
 % 
@@ -190,8 +160,8 @@ Yg = seabed_y0 + seabed_amp * (0.5*sin(2*pi*Xg/seabed_wid) + ...  % 横向波动
 pos_seabed = [Xg(:) Yg(:) Zg(:)];
 
 % 设置散射系数
-amp_target = 0.23 * ones(size(pos_target,1), 1);     % 目标均匀反射
-amp_seabed = 0.2 * abs(randn(size(pos_seabed,1), 1)); % 海底随机散射
+amp_target = 0.80 * ones(size(pos_target,1), 1);      % 目标强反射 (高于海底, 便于对比)
+amp_seabed = 0.10 * abs(randn(size(pos_seabed,1), 1)); % 海底弱随机散射
 
 disp(['海底散射体生成完成: ', num2str(size(pos_seabed,1)), ' 个散射点']);
 
@@ -706,6 +676,12 @@ az_deg = azimuth_axis * (180 / pi);   % 弧度 → 度 (用于坐标轴标注)
 fig_cmp = figure('Name', '前视声纳成像算法三路对比 (CBF / MVDR / FISTA)', ...
                  'Position', [50, 50, 1800, 600], 'Color', 'w');
 
+% 三目标位于 z=5m, x∈[-4cm, +4cm] → 方位角 ≈ ±0.46°
+% 统一坐标轴范围: 方位 ±5°, 深度 3-8 m
+% (海底在 10-18 m 处不会出现在此窗口, 画面干净, 便于分辨率对比)
+az_lim    = [-5, 5];   % 方位角显示范围 [°]
+depth_lim = [3, 8];    % 深度显示范围 [m]
+
 % --- 子图 1: CBF / DAS ---
 ax1 = subplot(1, 3, 1);
 b_data_cbf.plot(ax1);
@@ -713,7 +689,7 @@ colormap(ax1, hot);
 clim([-60 0]);
 title('CBF / DAS  (常规波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
-set(ax1, 'XDir', 'normal');
+set(ax1, 'XDir', 'normal', 'XLim', az_lim, 'YLim', depth_lim);
 
 % --- 子图 2: MVDR / Capon ---
 ax2 = subplot(1, 3, 2);
@@ -722,23 +698,26 @@ colormap(ax2, hot);
 clim([-60 0]);
 title('MVDR / Capon  (自适应波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
-set(ax2, 'XDir', 'normal');
+set(ax2, 'XDir', 'normal', 'XLim', az_lim, 'YLim', depth_lim);
 
 % --- 子图 3: CBF + FISTA 去卷积 ---
 ax3 = subplot(1, 3, 3);
 fista_db = 20 * log10(img_fista / (max(img_fista(:)) + eps) + eps);
 fista_db = max(fista_db, -60);        % 限制动态范围到 -60 dB
 imagesc(az_deg, depth_axis, fista_db);
-axis tight;
 colormap(ax3, hot);
 clim([-60 0]);
 colorbar;
 title('CBF + FISTA 去卷积  (稀疏正则化)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
-set(ax3, 'XDir', 'normal');
+set(ax3, 'XDir', 'normal', 'XLim', az_lim, 'YLim', depth_lim);
 
-sgtitle('前视声纳成像算法对比  (FLS Imaging Algorithm Comparison)', ...
-        'FontSize', 15, 'FontWeight', 'bold');
+% 联动三轴: 交互缩放/平移时同步
+linkaxes([ax1, ax2, ax3], 'xy');
+
+sgtitle(sprintf('前视声纳成像算法对比  —  3 紧邻目标 (间距 4 cm @ 5 m, CBF 分辨率 %.1f cm)\n CBF 无法分辨 | MVDR 边缘改善 | FISTA 完全分辨', ...
+        5 * tand(0.886 * (180/pi) * lambda / (probe.N * probe.pitch) * 1.68) * 100), ...
+        'FontSize', 13, 'FontWeight', 'bold');
 drawnow;
 
 fprintf('\n=== 前视声纳三路算法对比完成 ===\n');
