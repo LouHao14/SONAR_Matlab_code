@@ -523,6 +523,7 @@ end
 
 cbf_env = abs(cbf_complex);                     % 包络检波
 cbf_img = cbf_env / (max(cbf_env(:)) + eps);    % 归一化至 [0, 1]
+cbf_img = squeeze(double(real(cbf_img)));        % 确保为 2D 实数矩阵 (USTB 有时输出 N_d×N_a×1)
 
 %% Step 2: 估计系统点扩散函数 (PSF)
 % PSF 由阵列方向图 (方位向) 和脉冲带宽 (距离向) 共同决定
@@ -569,11 +570,14 @@ N_pad_a = N_a + 2 * pad_a;     % 填充后方位尺寸
 cbf_pad = zeros(N_pad_d, N_pad_a);
 cbf_pad(pad_r+1 : pad_r+N_d, pad_a+1 : pad_a+N_a) = cbf_img;
 
-% PSF: 放入填充矩阵后 ifftshift → 将 PSF 中心移至 (1,1) (FFT 原点),
-% 保证 ifft2 后卷积结果与图像对齐, 无需在迭代内额外调用 fftshift.
+% PSF: 放入填充矩阵左上角后 circshift → 将 PSF 中心精确移至 (1,1) (FFT 原点).
+% 【修正说明】原来的 ifftshift 在大矩阵 [N_pad_d × N_pad_a] 上执行，会把 PSF
+% 整体平移 ceil(N/2) 个位置 (约 264 行, 234 列) 到矩阵中央，而非目标的 (1,1)。
+% circshift 按 PSF 半宽精确平移，使中心从 (floor(Np_r/2)+1, floor(Np_a/2)+1)
+% 移到 (1,1)，从而保证 ifft2 后的卷积结果与图像正确对齐。
 PSF_pad = zeros(N_pad_d, N_pad_a);
 PSF_pad(1:Np_r, 1:Np_a) = PSF;
-PSF_pad = ifftshift(PSF_pad);
+PSF_pad = circshift(PSF_pad, [-floor(Np_r/2), -floor(Np_a/2)]);
 
 %% Step 4: 改进的 FISTA 迭代去卷积
 % 算法结构参考 EMBED (dtu-act/EMBED) 的 FISTA.m,
