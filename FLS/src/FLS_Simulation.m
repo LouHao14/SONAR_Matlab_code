@@ -53,7 +53,7 @@ pulse_duration          = 2.5;             % 脉冲持续时间 [周期]
 % 5 目标"临界分辨"场景（无海底散射体）
 % CBF Blackman 窗 3dB 波束宽度:
 %   bw_deg = 0.886*(180/pi)*lambda/(probe.N*probe.pitch)*1.68 ≈ 0.668°
-% 紧邻目标角度间距 delta_deg = 0.5 × bw_deg ≈ 0.334°
+% 紧邻目标角度间距 delta_deg = 0.8 × bw_deg ≈ 0.534°
 %   → CBF 刚好无法分辨 (Rayleigh 准则不满足)
 %   → FISTA 稀疏去卷积 → 完全分辨
 %
@@ -118,7 +118,7 @@ xdc_center_focus(Rh, [0 0 0]);
 %
 % 临界角度间距与目标布局
 bw_deg    = 0.886 * (180/pi) * lambda / (probe.N * probe.pitch) * 1.68;
-delta_deg = 0.5 * bw_deg;   % 临界角度间距: 50% BW → CBF 刚好无法分辨
+delta_deg = 0.8 * bw_deg;   % 临界角度间距: 80% BW → CBF 刚好无法分辨
 
 pos_target = [
     % 组1 @ z=6m: 两个紧邻目标，角度间距 delta_deg
@@ -565,7 +565,7 @@ ax1 = subplot(1, 3, 1);
 imagesc(az_deg, depth_axis, cbf_db_vis);
 colormap(ax1, hot); clim([-60 0]); colorbar;
 hold on;
-plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 16, 'LineWidth', 2.2);
+plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 8, 'LineWidth', 1.2);
 hold off;
 title('CBF / DAS  (常规波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
@@ -576,7 +576,7 @@ ax2 = subplot(1, 3, 2);
 imagesc(az_deg, depth_axis, mvdr_db_vis);
 colormap(ax2, hot); clim([-60 0]); colorbar;
 hold on;
-plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 16, 'LineWidth', 2.2);
+plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 8, 'LineWidth', 1.2);
 hold off;
 title('MVDR / Capon  (自适应波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
@@ -587,7 +587,7 @@ ax3 = subplot(1, 3, 3);
 imagesc(az_deg, depth_axis, fista_db);
 colormap(ax3, hot); clim([-60 0]); colorbar;
 hold on;
-plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 16, 'LineWidth', 2.2);
+plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 8, 'LineWidth', 1.2);
 hold off;
 title('CBF + FISTA 去卷积  (稀疏正则化)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
