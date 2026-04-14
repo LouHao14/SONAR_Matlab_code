@@ -268,8 +268,8 @@ pipe = pipeline();
 pipe.channel_data = channel_data;
 pipe.scan = sca;
 % 设置加窗
-pipe.receive_apodization.window = uff.window.tukey25;
-pipe.receive_apodization.f_number = F_number;
+pipe.receive_apodization.window = uff.window.none;
+pipe.receive_apodization.f_number = Inf;
 
 % -------------------------------------------------------------------------
 % 1. 常规波束形成 (CBF / DAS) - 作为基准
@@ -366,13 +366,28 @@ az_deg = azimuth_axis * (180 / pi);
 %% Step 2: 估计系统点扩散函数 (PSF)
 % PSF 由阵列方向图 (方位向) 和脉冲带宽 (距离向) 共同决定
 
-% --- 方位向 PSF: Blackman 加窗的阵列方向图 ---
-% 均匀线阵 3dB 波束宽度 [rad]: 0.886 * lambda / D_array
-bw_az_rad   = 0.886 * lambda / (probe.N * probe.pitch);
-bw_az_rad   = bw_az_rad * 1.68;   % Blackman 窗主瓣展宽因子 (~1.68×)
+% --- 方位向 PSF: 从孤立目标 T5 (z=8m, az=10°) 实测 ---
 az_step_rad = (azimuth_axis(end) - azimuth_axis(1)) / (N_a - 1);
-% 将 FWHM 转为像素域高斯标准差
-sigma_az_px = bw_az_rad / az_step_rad / (2 * sqrt(2 * log(2)));
+
+% 找孤立目标 T5 在图像中的像素位置
+[~, idx_r_t5] = min(abs(depth_axis - 8.0));
+[~, idx_a_t5] = min(abs(az_deg - 10.0));
+% 提取方位向剖面（目标所在深度行）
+az_profile = cbf_img(idx_r_t5, :);
+az_profile = az_profile / max(az_profile);
+% 找半最大值宽度(FWHM)对应的像素数
+half_max_pts = find(az_profile >= 0.5);
+if numel(half_max_pts) >= 2
+    fwhm_px = half_max_pts(end) - half_max_pts(1) + 1;
+    sigma_az_px = fwhm_px / (2 * sqrt(2 * log(2)));
+    fprintf('  实测PSF: FWHM = %d px (%.3f°), sigma = %.2f px\n', ...
+        fwhm_px, fwhm_px * az_step_rad * 180/pi, sigma_az_px);
+else
+    % 回退到理论值（实测失败时）
+    bw_az_rad   = 0.886 * lambda / (probe.N * probe.pitch) * 1.68;
+    sigma_az_px = bw_az_rad / az_step_rad / (2 * sqrt(2 * log(2)));
+    fprintf('  PSF: 实测失败，回退理论值 sigma = %.2f px\n', sigma_az_px);
+end
 
 % --- 距离向 PSF: 匹配滤波后的脉冲压缩响应 ---
 % 真实距离分辨率 ≈ c/(2*BW) ≈ 7.5 mm.  深度像素步长 ≈ 48.9 mm/px.
@@ -384,9 +399,8 @@ depth_step_m = (depth_axis(end) - depth_axis(1)) / (N_d - 1);
 sigma_r_px   = range_res_m / depth_step_m / (2 * sqrt(2 * log(2)));
 % 不截断: 真实值 ~0.15 px 确保深度 PSF 为 delta, FISTA 仅在方位向去卷积
 
-fprintf('  PSF: σ_方位 = %.2f px (%.2f°),  σ_距离 = %.3f px (%.1f mm)\n', ...
-    sigma_az_px, sigma_az_px * (2*sqrt(2*log(2))) * az_step_rad * 180/pi, ...
-    sigma_r_px,  sigma_r_px  * (2*sqrt(2*log(2))) * depth_step_m * 1e3);
+fprintf('  PSF: σ_距离 = %.3f px (%.1f mm)\n', ...
+    sigma_r_px, sigma_r_px * (2*sqrt(2*log(2))) * depth_step_m * 1e3);
 
 % --- 构建 2D 高斯 PSF 核 ---
 % 方位向宽 (sigma_az_px), 深度向极窄 (sigma_r_px ≈ delta) → 实质为 1D 方位 PSF
@@ -430,7 +444,7 @@ PSF_pad = circshift(PSF_pad, [-floor(Np_r/2), -floor(Np_a/2)]);
 %   3. 目标函数历史记录              (EMBED info.obj)
 %   4. 耗时统计                      (EMBED info.time)
 
-lambda_fista   = 0.05;   % L1 正则化强度 (越大越稀疏; 0.05 适合真实PSF)
+lambda_fista   = 0.02;   % L1 正则化强度 (全孔径SNR更好，降低至0.02以恢复细节)
 max_iter_fista = 200;    % 最大迭代次数
 
 % 预计算填充后 PSF 的 FFT 及伴随 FFT
