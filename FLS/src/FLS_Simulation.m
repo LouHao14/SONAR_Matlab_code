@@ -50,23 +50,14 @@ probe.N                 = 128;             % 阵元数量
 pulse_duration          = 2.5;             % 脉冲持续时间 [周期]
 
 %% 场景参数定义
-% 目标: 2 个紧邻点目标, 间距 4.5 cm @ z=5m
-% CBF 方位向 3dB 波束宽度 (Blackman 加窗) ≈ 1.68×0.886×λ/D ≈ 0.668°
-%   对应 z=5m 处横向分辨率 ≈ 5.8 cm
-% 目标间距 4.5 cm < 5.8 cm → CBF 融合为单个宽斑 (Rayleigh 准则不满足)
-% FISTA 稀疏去卷积 → 应可清晰分辨 4.5 cm 间距的双目标
-
-% 海底地形参数
-seabed_len      = 15;          % 海底长度(z方向) [m]
-seabed_wid      = 15;          % 海底宽度(x方向) [m]
-seabed_y0       = 10;          % 海底平均深度 [m]
-seabed_amp      = 3;           % 海底起伏幅度 [m]
-N_seabed_scatter = 1e4;        % 海底散射点数量
-
-% 视场(FOV)参数
-FOV_yaw         = -45:1:45;    % 水平角度网格 [度]
-FOV_pitch       = -45:1:45;    % 俯仰角度网格 [度]
-FOV_R           = seabed_len;  % 视场射线长度 [m]
+% 5 目标"临界分辨"场景（无海底散射体）
+% CBF Blackman 窗 3dB 波束宽度:
+%   bw_deg = 0.886*(180/pi)*lambda/(probe.N*probe.pitch)*1.68 ≈ 0.668°
+% 紧邻目标角度间距 delta_deg = 0.5 × bw_deg ≈ 0.334°
+%   → CBF 刚好无法分辨 (Rayleigh 准则不满足)
+%   → FISTA 稀疏去卷积 → 完全分辨
+%
+% 布局: 组1 @ z=6m (±delta/2), 组2 @ z=10m (±delta/2), 孤立目标 @ z=8m az=10°
 
 %% 脉冲定义
 % 
@@ -121,117 +112,44 @@ xdc_baffle(Rh, 0);
 xdc_center_focus(Rh, [0 0 0]);
 
 %% 目标点定义
-% 坐标格式: [x(横向/方位), y(俯仰/仰角=0 表示在扫描平面内), z(距离)] —— Field II 约定
+% 坐标格式: [x(横向/方位), y(俯仰/仰角=0), z(距离)] —— Field II 约定
 %
-% 2 个紧邻点目标 (间距 4.5 cm @ z=5m)
-%   角度间距 ≈ 2*atan(0.0225/5) = 0.515°  <  CBF 3dB 宽度 0.668°
-%   → CBF: 双目标融合为单个宽斑 (Rayleigh 准则不满足, 无法分辨)
-%   → FISTA: 稀疏去卷积后可分辨出两个独立峰值
+% 临界角度间距与目标布局
+bw_deg    = 0.886 * (180/pi) * lambda / (probe.N * probe.pitch) * 1.68;
+delta_deg = 0.5 * bw_deg;   % 临界角度间距: 50% BW → CBF 刚好无法分辨
 
 pos_target = [
-    -0.0225,  0,  5;   % 目标 1: 左偏 2.25 cm, 距离 5 m
-     0.0225,  0,  5;   % 目标 2: 右偏 2.25 cm, 距离 5 m
+    % 组1 @ z=6m: 两个紧邻目标，角度间距 delta_deg
+    -6*tand(delta_deg/2),  0,  6;   % 目标1 左
+    +6*tand(delta_deg/2),  0,  6;   % 目标2 右
+
+    % 组2 @ z=10m: 两个紧邻目标，角度间距 delta_deg
+    -10*tand(delta_deg/2), 0, 10;   % 目标3 左
+    +10*tand(delta_deg/2), 0, 10;   % 目标4 右
+
+    % 孤立参考目标 @ z=8m, 方位角10° (验证FISTA不破坏孤立点)
+    8*tand(10),            0,  8;   % 目标5
 ];
 
-disp('目标点定义完成: 2 个目标 (间距 4.5 cm @ 5 m)');
+amp_target = ones(5, 1);  % 等幅反射
 
-%% 定义海底散射体
-% 
-% 生成具有起伏的海底地形散射点
-
-disp('正在生成海底散射体...');
-
-% 计算网格点数
-Nx = round(sqrt(N_seabed_scatter * seabed_wid / seabed_len));
-Nz = round(N_seabed_scatter / Nx);
-
-% 生成均匀网格
-x_lin = linspace(-seabed_wid/2, seabed_wid/2, Nx);
-z_lin = linspace(0, seabed_len, Nz);
-[Xg, Zg] = meshgrid(x_lin, z_lin);
-
-% 添加深度起伏(y为深度方向)
-Yg = seabed_y0 + seabed_amp * (0.5*sin(2*pi*Xg/seabed_wid) + ...  % 横向波动
-                                0.5*sin(2*pi*Zg/seabed_len)) + ...  % 纵向波动
-                                0.1*randn(size(Xg));                % 随机噪声
+fprintf('目标定义: bw=%.3f°, delta=%.3f° (%.0f%% BW), 5个目标\n', ...
+    bw_deg, delta_deg, delta_deg/bw_deg*100);
 
 
-% 展开为点列表
-pos_seabed = [Xg(:) Yg(:) Zg(:)];
-
-% 设置散射系数
-amp_target = 0.80 * ones(size(pos_target,1), 1);      % 目标强反射 (高于海底, 便于对比)
-amp_seabed = 0.10 * abs(randn(size(pos_seabed,1), 1)); % 海底弱随机散射
-
-disp(['海底散射体生成完成: ', num2str(size(pos_seabed,1)), ' 个散射点']);
-
-%% 场景可视化
-% 
-% 显示完整的3D场景,包括目标、海底和视场网格
-
-disp('正在生成场景预览...');
-
-figure('Name', '前视声纳场景预览', 'Position', [50 60 1400 700]);
-
-% 子图1: 3D视图
-subplot(2,3,1);
-scatter3(pos_seabed(:,1), pos_seabed(:,2), pos_seabed(:,3), 3, 'b.'); 
+%% 场景预览 (仅目标)
+figure('Name', '5目标场景预览', 'Position', [50 60 600 500], 'Color', 'w');
+tgt_az_preview = atan2d(pos_target(:,1), pos_target(:,3));
+tgt_r_preview  = sqrt(pos_target(:,1).^2 + pos_target(:,3).^2);
+scatter(tgt_az_preview, tgt_r_preview, 120, 'g', 'filled');
 hold on;
-scatter3(pos_target(:,1), pos_target(:,2), pos_target(:,3), 10, 'g', 'filled');
-plot3(0, 0, 0, 'rp', 'MarkerFaceColor', 'r', 'MarkerSize', 10);
-set(gca, 'ZDir', 'reverse');
-axis equal tight; grid on;
-xlabel('x [m]'); ylabel('y [m]'); zlabel('z [m]');
-title('3D视图');
-view(35, 25);
-
-% 子图2: 顶视图(x-y)
-subplot(2,3,2);
-scatter(pos_seabed(:,1), pos_seabed(:,2), 3, 'b.'); 
-hold on;
-scatter(pos_target(:,1), pos_target(:,2), 10, 'g', 'filled');
-plot(0, 0, 'rp', 'MarkerFaceColor', 'r', 'MarkerSize', 8);
-axis equal tight; grid on;
-xlabel('x [m]'); ylabel('y [m]');
-title('顶视图 (x-y)');
-
-% 子图3: 侧视图(y-z)
-subplot(2,3,3);
-scatter(pos_seabed(:,2), pos_seabed(:,3), 3, 'b.'); 
-hold on;
-scatter(pos_target(:,2), pos_target(:,3), 10, 'g', 'filled');
-plot(0, 0, 'rp', 'MarkerFaceColor', 'r', 'MarkerSize', 8);
-set(gca, 'YDir', 'reverse');
-axis equal tight; grid on;
-xlabel('y [m]'); ylabel('z [m]');
-title('侧视图 (y-z)');
-
-% 子图4-6: 视场网格和散射体
-subplot(2,3,[4 5 6]);
-hold on; axis equal; grid on;
-set(gca, 'ZDir', 'reverse');
-xlabel('x [m]'); ylabel('y [m]'); zlabel('z [m]');
-title('视场网格与散射体');
-
-% 绘制水平角度网格线
-for ya = FOV_yaw
-    dir = [sind(ya) cosd(ya) 0] * FOV_R;
-    plot3([0 dir(1)], [0 0], [0 dir(2)], 'b-');
-end
-
-% 绘制俯仰角度网格线
-for pa = FOV_pitch
-    dir = [0 cosd(pa) sind(pa)] * FOV_R;
-    plot3([0 dir(1)], [0 dir(3)], [0 dir(2)], 'r-');
-end
-
-% 绘制稀疏采样的散射体(提高显示速度)
-scatter3(pos_seabed(1:15:end,1), pos_seabed(1:15:end,2), ...
-         pos_seabed(1:15:end,3), 3, 'b.');
-scatter3(pos_target(:,1), pos_target(:,2), pos_target(:,3), 10, 'g', 'filled');
-plot3(0, 0, 0, 'rp', 'MarkerFaceColor', 'r', 'MarkerSize', 10);
-legend('水平角网格', '俯仰角网格', '海底散射体', '目标', '阵列中心', 'Location', 'best');
-view(3);
+plot(0, 0, 'rp', 'MarkerFaceColor', 'r', 'MarkerSize', 12);
+grid on; set(gca, 'YDir', 'reverse');
+xlabel('方位角 [°]'); ylabel('距离 [m]');
+title(sprintf('5目标场景: delta=%.3f° (bw=%.3f°)', delta_deg, bw_deg));
+xlim([-2, 12]); ylim([5, 11]);
+text(tgt_az_preview+0.1, tgt_r_preview, ...
+    {'T1','T2','T3','T4','T5'}, 'FontSize', 10, 'Color', 'k');
 drawnow;
 
 
@@ -246,97 +164,13 @@ Na = 1;                 % 平面波数量
 F = 1;                  % 帧数
 alpha = linspace(-alpha_max, alpha_max, Na);  % 角度向量 [rad]
 
-%% 组合所有散射点
-% 
-% 将目标和海底散射点合并为完整的散射场
+%% 散射点 (仅目标, 无海底)
+point_position   = pos_target;
+point_amplitudes = amp_target;
 
-point_position = [pos_target; pos_seabed];
-point_amplitudes = [amp_target; amp_seabed];
-
-disp(['总散射点数: ', num2str(size(point_position,1))]);
+disp(['散射点数: ', num2str(size(point_position,1)), ' 个目标']);
 
 
-%% ========================================================================
-%  新增模块：绘制前视声纳(FLS) 3D 探测范围 (符合 FLS 视觉习惯版)
-%  坐标映射说明：
-%  - 绘图 X轴 = 物理横向 (Field II X)
-%  - 绘图 Y轴 = 物理前方距离 (Field II Z)  <-- 关键交换
-%  - 绘图 Z轴 = 物理深度 (Field II Y)      <-- 关键交换
-% ========================================================================
-figure(99); clf;
-set(gcf, 'Name', 'FLS 3D场景与FOV可视化', 'Color', 'w');
-hold on; box on; grid on;
-
-% --- 1. 获取探测几何参数 ---
-R_max_vis = seabed_len; % 最大探测距离 (15m)
-yaw_half_deg = max(abs(FOV_yaw));   
-pitch_half_deg = max(abs(FOV_pitch)); 
-
-% --- 2. 转换点云坐标 (关键步骤：交换 Y 和 Z) ---
-% point_position 原本是 [x, y(深度), z(距离)]
-% 我们将其转换为绘图用的 [x, z(距离), y(深度)]
-plot_pos_scat = point_position; 
-plot_pos_scat(:,2) = point_position(:,3); % 绘图Y = 物理Z
-plot_pos_scat(:,3) = point_position(:,2); % 绘图Z = 物理Y
-
-% --- 3. 计算视锥体顶点 (已适配交换后的坐标系) ---
-% Field II 物理尺寸
-X_face_half = R_max_vis * tand(yaw_half_deg);
-Y_face_half = R_max_vis * tand(pitch_half_deg); % 这是物理上的半高
-
-% 顶点定义 [绘图X, 绘图Y(距离), 绘图Z(深度)]
-V0 = [0, 0, 0]; % 原点
-% 最远端面的四个角点 (距离都在 R_max_vis)
-V1 = [-X_face_half, R_max_vis, -Y_face_half];
-V2 = [ X_face_half, R_max_vis, -Y_face_half];
-V3 = [ X_face_half, R_max_vis,  Y_face_half];
-V4 = [-X_face_half, R_max_vis,  Y_face_half];
-
-Vertices_pyramid = [V0; V1; V2; V3; V4];
-
-% --- 4. 绘制半透明视锥体 ---
-Faces_pyramid = [
-    1 2 3 NaN;  % 侧面
-    1 3 4 NaN;  % 侧面
-    1 4 5 NaN;  % 侧面
-    1 5 2 NaN;  % 侧面
-    2 3 4 5     % 底面 (最远端)
-];
-
-patch('Vertices', Vertices_pyramid, 'Faces', Faces_pyramid, ...
-      'FaceColor', 'g', 'FaceAlpha', 0.1, ...
-      'EdgeColor', 'g', 'LineWidth', 1.5, 'LineStyle', '--', ...
-      'DisplayName', 'FOV探测边界');
-
-% --- 5. 绘制场景物体 ---
-% 声纳头
-plot3(0, 0, 0, 'ks', 'MarkerSize', 12, 'MarkerFaceColor', 'k', 'DisplayName', '声纳头');
-
-% 场景点云 (使用转换后的坐标 plot_pos_scat)
-scatter3(plot_pos_scat(:,1), plot_pos_scat(:,2), plot_pos_scat(:,3), ...
-         12, point_amplitudes, 'filled', 'DisplayName', '海底与目标');
-colormap(jet); 
-
-% --- 6. 视觉调整 (符合航海习惯) ---
-xlabel('横向 X [m]');
-ylabel('前方距离 Z [m]');  % 注意：现在Y轴显示的是距离
-zlabel('深度 Y [m]');      % 注意：现在Z轴显示的是深度
-
-% 【核心设置】反转 Z 轴
-% 因为深度通常是向下增加的，但在 3D 图里 Z 轴向上是正。
-% 我们反转它，让 Z=0 (水面) 在最上面，Z=10 (海底) 在下面。
-set(gca, 'ZDir', 'reverse'); 
-
-% 调整视角
-% view(-30, 30); % 侧俯视
-view(0, 90); % 切换到【顶视图/地图视角】 (X-Y平面)，就像导航地图一样
-% 如果想看立体效果，可以取消上面一行，改用: view(45, 30);
-
-axis equal tight;
-title('FLS 仿真场景 (符合直觉坐标系)');
-legend('show', 'Location', 'northeast');
-
-fprintf('已更新 FLS 可视化窗口 (Figure 99)，坐标轴已修正。\n');
 %% 输出数据初始化
 
 cropat = round(2*50e-3/c0/dt);    % 最大时间采样点
@@ -413,8 +247,8 @@ channel_data.data = CPW ./ max(CPW(:));  % 归一化
 % 扫描区域定义为覆盖感兴趣区域的像素集合。
 % 这里使用*sector_scan*结构,用方位角和深度定义。
 
-depth_axis = linspace(0, 25, 512)';           % 深度轴: 0-25m, 512点
-azimuth_axis = linspace(-45, 45, 451)/180*pi; % 方位轴: ±45°, 451点
+depth_axis   = linspace(4.5, 11.5, 512)';            % 深度轴: 4.5-11.5m, 512点
+azimuth_axis = linspace(-3, 13, 1024) / 180 * pi;   % 方位轴: -3°~13°, 1024点
 
 sca = uff.sector_scan('azimuth_axis', azimuth_axis, 'depth_axis', depth_axis);
 
@@ -712,20 +546,26 @@ mvdr_db_vis = max(mvdr_db_vis, -60);
 fista_db = 20 * log10(img_fista / (max(img_fista(:)) + eps) + eps);
 fista_db = max(fista_db, -60);
 
-%% 统一坐标轴范围
-% 目标在方位 ±0.46° @ 深度 ~5 m.
-% az_lim = ±2°: 目标占视野 23%, CBF 主瓣 0.67° 清晰可见
-% depth_lim = [3.5, 6.5]: 留余量以适应 DAS 延时校准误差
-az_lim    = [-2, 2];
-depth_lim = [3.5, 6.5];
+%% 统一坐标轴范围与目标真实位置
+az_lim    = [-1.5, 11.5];
+depth_lim = [4.5, 11.5];
 
-fig_cmp = figure('Name', '前视声纳成像算法三路对比 (CBF / MVDR / FISTA)', ...
+% 目标理论方位角与距离 (用于在图像上标注)
+tgt_az = [-delta_deg/2,  delta_deg/2, ...  % 组1 @ z=6m
+          -delta_deg/2,  delta_deg/2, ...  % 组2 @ z=10m
+          10];                              % 孤立目标
+tgt_r  = [6, 6, 10, 10, 8];
+
+fig_cmp = figure('Name', 'FLS成像算法三路对比 (CBF / MVDR / FISTA)', ...
                  'Position', [50, 50, 1800, 600], 'Color', 'w');
 
 % --- 子图 1: CBF / DAS ---
 ax1 = subplot(1, 3, 1);
 imagesc(az_deg, depth_axis, cbf_db_vis);
 colormap(ax1, hot); clim([-60 0]); colorbar;
+hold on;
+plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 16, 'LineWidth', 2.2);
+hold off;
 title('CBF / DAS  (常规波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
 set(ax1, 'XLim', az_lim, 'YLim', depth_lim);
@@ -734,6 +574,9 @@ set(ax1, 'XLim', az_lim, 'YLim', depth_lim);
 ax2 = subplot(1, 3, 2);
 imagesc(az_deg, depth_axis, mvdr_db_vis);
 colormap(ax2, hot); clim([-60 0]); colorbar;
+hold on;
+plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 16, 'LineWidth', 2.2);
+hold off;
 title('MVDR / Capon  (自适应波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
 set(ax2, 'XLim', az_lim, 'YLim', depth_lim);
@@ -742,16 +585,19 @@ set(ax2, 'XLim', az_lim, 'YLim', depth_lim);
 ax3 = subplot(1, 3, 3);
 imagesc(az_deg, depth_axis, fista_db);
 colormap(ax3, hot); clim([-60 0]); colorbar;
+hold on;
+plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 16, 'LineWidth', 2.2);
+hold off;
 title('CBF + FISTA 去卷积  (稀疏正则化)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
 set(ax3, 'XLim', az_lim, 'YLim', depth_lim);
 
-% 联动三轴: 交互缩放/平移时同步
+% 联动三轴
 linkaxes([ax1, ax2, ax3], 'xy');
 
-sgtitle(sprintf('前视声纳成像算法对比  —  2 紧邻目标 (间距 4.5 cm @ 5 m, CBF 3dB 宽度 %.1f cm)\n CBF 无法分辨 | MVDR 边缘改善 | FISTA + 真实PSF 完全分辨', ...
-        5 * tand(0.886 * (180/pi) * lambda / (probe.N * probe.pitch) * 1.68) * 100), ...
-        'FontSize', 13, 'FontWeight', 'bold');
+sgtitle(sprintf('FLS成像算法对比 — 5目标场景\n紧邻目标角度间距=%.3f° (%.1f×CBF 3dB宽度=%.3f°)\nCBF无法分辨 | MVDR边缘改善 | FISTA完全分辨', ...
+    delta_deg, delta_deg/bw_deg, bw_deg), ...
+    'FontSize', 13, 'FontWeight', 'bold');
 drawnow;
 
 fprintf('\n=== 前视声纳三路算法对比完成 ===\n');
