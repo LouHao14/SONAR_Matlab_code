@@ -529,6 +529,9 @@ cbf_env = abs(cbf_complex);                     % 包络检波
 cbf_img = cbf_env / (max(cbf_env(:)) + eps);    % 归一化至 [0, 1]
 cbf_img = squeeze(double(real(cbf_img)));        % 确保为 2D 实数矩阵 (USTB 有时输出 N_d×N_a×1)
 
+% 方位角轴 (度), 后续 PSF 提取和可视化均使用
+az_deg = azimuth_axis * (180 / pi);
+
 %% Step 2: 估计系统点扩散函数 (PSF)
 % PSF 由阵列方向图 (方位向) 和脉冲带宽 (距离向) 共同决定
 
