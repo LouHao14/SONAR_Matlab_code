@@ -269,7 +269,7 @@ pipe.channel_data = channel_data;
 pipe.scan = sca;
 % 设置加窗
 pipe.receive_apodization.window = uff.window.none;
-pipe.receive_apodization.f_number = Inf;
+pipe.receive_apodization.f_number = 1e6;  % window.none时f_number无效，给大值占位
 
 % -------------------------------------------------------------------------
 % 1. 常规波束形成 (CBF / DAS) - 作为基准
