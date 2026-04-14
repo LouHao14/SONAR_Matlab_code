@@ -223,6 +223,10 @@ for f = 1:F
         seq(n).source.distance = Inf;  % 平面波
         seq(n).sound_speed = c0;
         seq(n).delay = -lag*dt + t;
+        % 记录第一次发射的实际采样起始时间（用于修正距离偏移）
+        if n == 1 && f == 1
+            channel_data_initial_time = t;
+        end
     end
 end
 close(wb);
@@ -236,7 +240,7 @@ disp('数据计算完成!');
 channel_data = uff.channel_data();
 channel_data.sampling_frequency = fs;
 channel_data.sound_speed = c0;
-channel_data.initial_time = 0;
+channel_data.initial_time = channel_data_initial_time;
 channel_data.pulse = pulse;
 channel_data.probe = probe;
 channel_data.sequence = seq;
