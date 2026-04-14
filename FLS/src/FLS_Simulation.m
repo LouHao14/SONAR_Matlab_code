@@ -50,12 +50,11 @@ probe.N                 = 128;             % 阵元数量
 pulse_duration          = 2.5;             % 脉冲持续时间 [周期]
 
 %% 场景参数定义
-% 目标: 2 个紧邻点目标 (分辨率测试) + 1 个隔离参考目标 (PSF 提取)
+% 目标: 2 个紧邻点目标, 间距 4.5 cm @ z=5m
 % CBF 方位向 3dB 波束宽度 (Blackman 加窗) ≈ 1.68×0.886×λ/D ≈ 0.668°
 %   对应 z=5m 处横向分辨率 ≈ 5.8 cm
-% 测试目标间距 4.5 cm < 5.8 cm → CBF 融合为单个宽斑 (Rayleigh 准则不满足)
-% 参考目标 @ z=8m 孤立 → 从 CBF 图像提取真实 PSF (替代理论高斯近似)
-% FISTA + 真实 PSF → 应可清晰分辨 4.5 cm 间距的双目标
+% 目标间距 4.5 cm < 5.8 cm → CBF 融合为单个宽斑 (Rayleigh 准则不满足)
+% FISTA 稀疏去卷积 → 应可清晰分辨 4.5 cm 间距的双目标
 
 % 海底地形参数
 seabed_len      = 15;          % 海底长度(z方向) [m]
@@ -124,20 +123,17 @@ xdc_center_focus(Rh, [0 0 0]);
 %% 目标点定义
 % 坐标格式: [x(横向/方位), y(俯仰/仰角=0 表示在扫描平面内), z(距离)] —— Field II 约定
 %
-% 2 个紧邻点目标 (间距 4.5 cm @ z=5m) + 1 个隔离参考目标 (@ z=8m)
-%
-%   测试目标角度间距 ≈ 2*atan(0.0225/5) = 0.515°  <  CBF 3dB 宽度 0.668°
+% 2 个紧邻点目标 (间距 4.5 cm @ z=5m)
+%   角度间距 ≈ 2*atan(0.0225/5) = 0.515°  <  CBF 3dB 宽度 0.668°
 %   → CBF: 双目标融合为单个宽斑 (Rayleigh 准则不满足, 无法分辨)
-%   → FISTA + 真实PSF: 稀疏去卷积后可分辨出两个独立峰值
-%   参考目标 @ z=8m: 孤立强散射体, 专用于提取真实系统 PSF
+%   → FISTA: 稀疏去卷积后可分辨出两个独立峰值
 
 pos_target = [
-    -0.0225,  0,  5;   % 测试目标 1: 左偏 2.25 cm, 距离 5 m
-     0.0225,  0,  5;   % 测试目标 2: 右偏 2.25 cm, 距离 5 m
-     0.0000,  0,  8;   % 参考目标:   正中,          距离 8 m (PSF 提取用)
+    -0.0225,  0,  5;   % 目标 1: 左偏 2.25 cm, 距离 5 m
+     0.0225,  0,  5;   % 目标 2: 右偏 2.25 cm, 距离 5 m
 ];
 
-disp('目标点定义完成: 2 个测试目标 (间距 4.5 cm @ 5 m) + 1 个参考目标 (@ 8 m)');
+disp('目标点定义完成: 2 个目标 (间距 4.5 cm @ 5 m)');
 
 %% 定义海底散射体
 % 
@@ -544,52 +540,26 @@ az_step_rad = (azimuth_axis(end) - azimuth_axis(1)) / (N_a - 1);
 sigma_az_px = bw_az_rad / az_step_rad / (2 * sqrt(2 * log(2)));
 
 % --- 距离向 PSF: 匹配滤波后的脉冲压缩响应 ---
-range_res_m  = c0 / (2 * BW);     % 距离分辨率 [m]
+% 真实距离分辨率 ≈ c/(2*BW) ≈ 7.5 mm.  深度像素步长 ≈ 48.9 mm/px.
+% → sigma_r ≈ 0.15 px (远小于 1 像素) → 深度方向 PSF 近似为 delta 函数.
+% 【关键】不做下限截断: 若截断至 0.5 px, 深度方向会产生人工展宽,
+%   FISTA 可能将方位向的双目标错误分解为深度方向的双目标 (伪影).
+range_res_m  = c0 / (2 * BW);
 depth_step_m = (depth_axis(end) - depth_axis(1)) / (N_d - 1);
 sigma_r_px   = range_res_m / depth_step_m / (2 * sqrt(2 * log(2)));
-sigma_r_px   = max(sigma_r_px, 0.5);  % 至少保留 0.5 像素宽
+% 不截断: 真实值 ~0.15 px 确保深度 PSF 为 delta, FISTA 仅在方位向去卷积
 
-fprintf('  PSF: σ_方位 = %.2f px (%.2f°),  σ_距离 = %.2f px (%.1f mm)\n', ...
+fprintf('  PSF: σ_方位 = %.2f px (%.2f°),  σ_距离 = %.3f px (%.1f mm)\n', ...
     sigma_az_px, sigma_az_px * (2*sqrt(2*log(2))) * az_step_rad * 180/pi, ...
     sigma_r_px,  sigma_r_px  * (2*sqrt(2*log(2))) * depth_step_m * 1e3);
 
-% --- 从 CBF 图像提取真实 PSF (参考目标 @ z=8m, az=0°) ---
-% 真实 PSF 直接反映阵列方向图+加窗+匹配滤波的综合效果,
-% 比理论高斯近似更准确，能显著改善 FISTA 去卷积质量。
-half_w  = max(ceil(4 * max(sigma_az_px, sigma_r_px)), 8);
-
-ref_z_m   = 8.0;   % 参考目标深度 [m]
-ref_az_val = 0.0;  % 参考目标方位角 [°]
-
-% 粗定位: 找最接近参考目标位置的像素
-[~, ref_d_idx] = min(abs(depth_axis - ref_z_m));
-[~, ref_a_idx] = min(abs(az_deg    - ref_az_val));
-
-% 精定位: 在 ±8 像素范围内搜索局部最大值 (消除定时误差影响)
-srch = 8;
-d_s = max(1, ref_d_idx-srch) : min(N_d, ref_d_idx+srch);
-a_s = max(1, ref_a_idx-srch) : min(N_a, ref_a_idx+srch);
-[~, pk_lin] = max(reshape(cbf_img(d_s, a_s), [], 1));
-[pk_dr, pk_ar] = ind2sub([numel(d_s), numel(a_s)], pk_lin);
-ref_d_pk = d_s(pk_dr);
-ref_a_pk = a_s(pk_ar);
-
-% 以峰值为中心切取 PSF 块
-d_lo = max(1, ref_d_pk - half_w);  d_hi = min(N_d, ref_d_pk + half_w);
-a_lo = max(1, ref_a_pk - half_w);  a_hi = min(N_a, ref_a_pk + half_w);
-psf_raw = cbf_img(d_lo:d_hi, a_lo:a_hi);
-
-% 填入标准尺寸矩阵 (PSF 中心对齐)
-Np_psf = 2*half_w + 1;
-PSF    = zeros(Np_psf, Np_psf);
-d_off  = half_w - (ref_d_pk - d_lo);
-a_off  = half_w - (ref_a_pk - a_lo);
-PSF(d_off+1 : d_off+size(psf_raw,1), a_off+1 : a_off+size(psf_raw,2)) = psf_raw;
-PSF = max(PSF, 0);
-PSF = PSF / (sum(PSF(:)) + eps);    % 总能量归一化
-
-fprintf('  真实 PSF 已提取 (%d×%d px): 参考目标峰值 @ d=%.2f m, az=%.2f°\n', ...
-    Np_psf, Np_psf, depth_axis(ref_d_pk), az_deg(ref_a_pk));
+% --- 构建 2D 高斯 PSF 核 ---
+% 方位向宽 (sigma_az_px), 深度向极窄 (sigma_r_px ≈ delta) → 实质为 1D 方位 PSF
+half_w = max(ceil(4 * sigma_az_px), 8);   % 仅由方位宽度决定窗口大小
+[gx, gy] = meshgrid(-half_w:half_w, -half_w:half_w);
+% gx: 方位向 (列方向, 宽), gy: 深度向 (行方向, 极窄)
+PSF = exp(-0.5 * ((gx / sigma_az_px).^2 + (gy / sigma_r_px).^2));
+PSF = PSF / sum(PSF(:));    % 总能量归一化
 
 %% Step 3: 零填充 (避免循环卷积绕回伪影)
 % 参考: EMBED (dtu-act/EMBED) zeropad 策略
