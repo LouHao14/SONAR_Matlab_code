@@ -370,8 +370,8 @@ az_deg = azimuth_axis * (180 / pi);
 az_step_rad = (azimuth_axis(end) - azimuth_axis(1)) / (N_a - 1);
 
 % 找孤立目标 T5 在图像中的像素位置
-[~, idx_r_t5] = min(abs(depth_axis - 8.0));
-[~, idx_a_t5] = min(abs(az_deg - 10.0));
+[~, idx_r_t5] = min(abs(depth_axis - 6.0));
+[~, idx_a_t5] = min(abs(az_deg - 0.0));
 % 提取方位向剖面（目标所在深度行）
 az_profile = cbf_img(idx_r_t5, :);
 az_profile = az_profile / max(az_profile);
@@ -444,8 +444,8 @@ PSF_pad = circshift(PSF_pad, [-floor(Np_r/2), -floor(Np_a/2)]);
 %   3. 目标函数历史记录              (EMBED info.obj)
 %   4. 耗时统计                      (EMBED info.time)
 
-lambda_fista   = 0.02;   % L1 正则化强度 (全孔径SNR更好，降低至0.02以恢复细节)
-max_iter_fista = 200;    % 最大迭代次数
+lambda_fista   = 0.05;   % L1 正则化强度 (增强稀疏约束，消除两点间残留连接)
+max_iter_fista = 500;    % 最大迭代次数 (增加迭代使充分收敛)
 
 % 预计算填充后 PSF 的 FFT 及伴随 FFT
 % 对实数对称 PSF: conj(H_fft) 等价于 EMBED 的 fft2(rot90(PSF,2))
@@ -505,7 +505,7 @@ for k = 1:max_iter_fista
     obj_val        = 0.5 * norm(residual(:))^2 + lambda_fista * sum(x_new(:));
     obj_history(k) = obj_val;
     rel_change     = abs(prev_obj - obj_val) / (abs(prev_obj) + eps);
-    if rel_change < 1e-6 && k > 10
+    if rel_change < 1e-7 && k > 10
         fprintf('  FISTA 收敛于第 %d 次迭代 (Δobj = %.2e)\n', k, rel_change);
         obj_history = obj_history(1:k);
         break;
