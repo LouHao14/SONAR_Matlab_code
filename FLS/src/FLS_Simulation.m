@@ -53,7 +53,7 @@ pulse_duration          = 2.5;             % 脉冲持续时间 [周期]
 % 5 目标"临界分辨"场景（无海底散射体）
 % CBF Blackman 窗 3dB 波束宽度:
 %   bw_deg = 0.886*(180/pi)*lambda/(probe.N*probe.pitch)*1.68 ≈ 0.668°
-% 紧邻目标角度间距 delta_deg = 0.8 × bw_deg ≈ 0.534°
+% 紧邻目标角度间距 delta_deg = 1.0 × bw_deg ≈ 0.668° (Rayleigh准则边界)
 %   → CBF 刚好无法分辨 (Rayleigh 准则不满足)
 %   → FISTA 稀疏去卷积 → 完全分辨
 %
@@ -118,7 +118,7 @@ xdc_center_focus(Rh, [0 0 0]);
 %
 % 临界角度间距与目标布局
 bw_deg    = 0.886 * (180/pi) * lambda / (probe.N * probe.pitch) * 1.68;
-delta_deg = 0.8 * bw_deg;   % 临界角度间距: 80% BW → CBF 刚好无法分辨
+delta_deg = 1.0 * bw_deg;   % 临界角度间距: 100% BW (Rayleigh准则边界)
 
 pos_target = [
     % 组1 @ z=6m: 两个紧邻目标，角度间距 delta_deg
@@ -369,12 +369,15 @@ az_deg = azimuth_axis * (180 / pi);
 % --- 方位向 PSF: 从孤立目标 T5 (z=8m, az=10°) 实测 ---
 az_step_rad = (azimuth_axis(end) - azimuth_axis(1)) / (N_a - 1);
 
-% 找孤立目标 T5 在图像中的像素位置
-[~, idx_r_t5] = min(abs(depth_axis - 6.0));
-[~, idx_a_t5] = min(abs(az_deg - 0.0));
-% 提取方位向剖面（目标所在深度行）
-az_profile = cbf_img(idx_r_t5, :);
-az_profile = az_profile / max(az_profile);
+% 找孤立目标 T5 在图像中的像素位置 (z=8m, az=10°，与待分辨目标无重叠)
+[~, idx_r_t5] = min(abs(depth_axis - 8.0));
+[~, idx_a_t5] = min(abs(az_deg - 10.0));
+% 提取以 T5 为中心的局部方位向剖面（避免远端目标污染）
+half_range = 50;
+col_start = max(1, idx_a_t5 - half_range);
+col_end   = min(N_a, idx_a_t5 + half_range);
+az_profile = cbf_img(idx_r_t5, col_start:col_end);
+az_profile = az_profile / (max(az_profile) + eps);
 % 找半最大值宽度(FWHM)对应的像素数
 half_max_pts = find(az_profile >= 0.5);
 if numel(half_max_pts) >= 2
@@ -444,7 +447,7 @@ PSF_pad = circshift(PSF_pad, [-floor(Np_r/2), -floor(Np_a/2)]);
 %   3. 目标函数历史记录              (EMBED info.obj)
 %   4. 耗时统计                      (EMBED info.time)
 
-lambda_fista   = 0.05;   % L1 正则化强度 (增强稀疏约束，消除两点间残留连接)
+lambda_fista   = 0.02;   % L1 正则化强度 (PSF正确后无需过强约束)
 max_iter_fista = 500;    % 最大迭代次数 (增加迭代使充分收敛)
 
 % 预计算填充后 PSF 的 FFT 及伴随 FFT
