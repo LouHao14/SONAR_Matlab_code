@@ -120,22 +120,26 @@ xdc_center_focus(Rh, [0 0 0]);
 bw_deg    = 0.886 * (180/pi) * lambda / (probe.N * probe.pitch) * 1.68;
 delta_deg = 1.0 * bw_deg;   % 临界角度间距: 100% BW (Rayleigh准则边界)
 
+dr_m = 2 * c0 / (2 * BW);   % 2倍距离分辨率 ≈ 15 mm (组2距离向间距)
+
 pos_target = [
-    % 组1 @ z=6m: 两个紧邻目标，角度间距 delta_deg
-    -6*tand(delta_deg/2),  0,  6;   % 目标1 左
-    +6*tand(delta_deg/2),  0,  6;   % 目标2 右
+    % 组1 @ z=6m: 方位向紧邻目标对，角度间距 delta_deg
+    -6*tand(delta_deg/2),  0,  6;         % 目标1 左
+    +6*tand(delta_deg/2),  0,  6;         % 目标2 右
 
-    % 组2 @ z=10m: 两个紧邻目标，角度间距 delta_deg
-    -10*tand(delta_deg/2), 0, 10;   % 目标3 左
-    +10*tand(delta_deg/2), 0, 10;   % 目标4 右
+    % 组2 @ z=10m: 十字形4目标（方位向+距离向各一对）
+    -10*tand(delta_deg/2), 0, 10;         % 目标3 十字左（方位向）
+    +10*tand(delta_deg/2), 0, 10;         % 目标4 十字右（方位向）
+    0,                     0, 10-dr_m/2;  % 目标5 十字上（距离向）
+    0,                     0, 10+dr_m/2;  % 目标6 十字下（距离向）
 
-    % 孤立参考目标 @ z=8m, 方位角10° (验证FISTA不破坏孤立点)
-    8*tand(10),            0,  8;   % 目标5
+    % 孤立参考目标 @ z=8m, 方位角5° (减小大角度坐标系误差)
+    8*tand(5),             0,  8;         % 目标7
 ];
 
-amp_target = ones(5, 1);
+amp_target = [1; 1; 1; 1; 1; 1; 2];  % T7(孤立目标) 幅度×2 补偿az=5°处增益衰减
 
-fprintf('目标定义: bw=%.3f°, delta=%.3f° (%.0f%% BW), 5个目标\n', ...
+fprintf('目标定义: bw=%.3f°, delta=%.3f° (%.0f%% BW), 7个目标\n', ...
     bw_deg, delta_deg, delta_deg/bw_deg*100);
 
 
@@ -148,10 +152,10 @@ hold on;
 plot(0, 0, 'rp', 'MarkerFaceColor', 'r', 'MarkerSize', 12);
 grid on; set(gca, 'YDir', 'reverse');
 xlabel('方位角 [°]'); ylabel('距离 [m]');
-title(sprintf('5目标场景: delta=%.3f° (bw=%.3f°)', delta_deg, bw_deg));
+title(sprintf('7目标场景: delta=%.3f° (bw=%.3f°)', delta_deg, bw_deg));
 xlim([-2, 12]); ylim([5, 11]);
 text(tgt_az_preview+0.1, tgt_r_preview, ...
-    {'T1','T2','T3','T4','T5'}, 'FontSize', 10, 'Color', 'k');
+    {'T1','T2','T3','T4','T5','T6','T7'}, 'FontSize', 10, 'Color', 'k');
 drawnow;
 
 
@@ -447,7 +451,7 @@ PSF_pad = circshift(PSF_pad, [-floor(Np_r/2), -floor(Np_a/2)]);
 %   3. 目标函数历史记录              (EMBED info.obj)
 %   4. 耗时统计                      (EMBED info.time)
 
-lambda_fista   = 0.015;  % L1 正则化强度 (保守阈值，避免旁瓣被误判为目标)
+lambda_fista   = 0.008;  % L1 正则化强度 (适中阈值，使弱目标T7通过阈值)
 max_iter_fista = 500;    % 最大迭代次数 (增加迭代使充分收敛)
 
 % 预计算填充后 PSF 的 FFT 及伴随 FFT
@@ -569,10 +573,10 @@ az_lim    = [-1.5, 11.5];
 depth_lim = [4.5, 11.5];
 
 % 目标理论方位角与距离 (用于在图像上标注)
-tgt_az = [-delta_deg/2,  delta_deg/2, ...  % 组1 @ z=6m
-          -delta_deg/2,  delta_deg/2, ...  % 组2 @ z=10m
-          10];                              % 孤立目标
-tgt_r  = [6, 6, 10, 10, 8];
+tgt_az = [-delta_deg/2,  delta_deg/2, ...        % 组1 @ z=6m
+          -delta_deg/2,  delta_deg/2, 0, 0, ...  % 组2十字 @ z=10m
+          5];                                      % 孤立目标T7 @ az=5°
+tgt_r  = [6, 6, 10, 10, 10-dr_m/2, 10+dr_m/2, 8];
 
 fig_cmp = figure('Name', 'FLS成像算法三路对比 (CBF / MVDR / FISTA)', ...
                  'Position', [50, 50, 1800, 600], 'Color', 'w');
@@ -613,7 +617,7 @@ set(ax3, 'XLim', az_lim, 'YLim', depth_lim);
 % 联动三轴
 linkaxes([ax1, ax2, ax3], 'xy');
 
-sgtitle(sprintf('FLS成像算法对比 — 5目标场景\n紧邻目标角度间距=%.3f° (%.1f×CBF 3dB宽度=%.3f°)\nCBF无法分辨 | MVDR边缘改善 | FISTA完全分辨', ...
+sgtitle(sprintf('FLS成像算法对比 — 7目标场景\n紧邻目标角度间距=%.3f° (%.1f×CBF 3dB宽度=%.3f°)\nCBF无法分辨 | MVDR边缘改善 | FISTA完全分辨', ...
     delta_deg, delta_deg/bw_deg, bw_deg), ...
     'FontSize', 13, 'FontWeight', 'bold');
 drawnow;
