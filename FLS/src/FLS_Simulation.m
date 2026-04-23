@@ -133,7 +133,7 @@ pos_target = [
     8*tand(10),            0,  8;   % 目标5
 ];
 
-amp_target = [1; 1; 1; 1; 3];  % T5 幅度×3，补偿 az=10° 处阵列接收增益衰减
+amp_target = ones(5, 1);
 
 fprintf('目标定义: bw=%.3f°, delta=%.3f° (%.0f%% BW), 5个目标\n', ...
     bw_deg, delta_deg, delta_deg/bw_deg*100);
@@ -447,7 +447,7 @@ PSF_pad = circshift(PSF_pad, [-floor(Np_r/2), -floor(Np_a/2)]);
 %   3. 目标函数历史记录              (EMBED info.obj)
 %   4. 耗时统计                      (EMBED info.time)
 
-lambda_fista   = 0.008;  % L1 正则化强度 (降低阈值使弱目标T5通过，不破坏双目标分辨)
+lambda_fista   = 0.015;  % L1 正则化强度 (保守阈值，避免旁瓣被误判为目标)
 max_iter_fista = 500;    % 最大迭代次数 (增加迭代使充分收敛)
 
 % 预计算填充后 PSF 的 FFT 及伴随 FFT
