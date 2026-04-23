@@ -120,26 +120,27 @@ xdc_center_focus(Rh, [0 0 0]);
 bw_deg    = 0.886 * (180/pi) * lambda / (probe.N * probe.pitch) * 1.68;
 delta_deg = 1.0 * bw_deg;   % 临界角度间距: 100% BW (Rayleigh准则边界)
 
-dr_m = 2 * c0 / (2 * BW);   % 2倍距离分辨率 ≈ 15 mm (组2距离向间距)
+dr_m = 3 * c0 / (2 * BW);   % 3倍距离分辨率 ≈ 22.5 mm (组2距离向间距)
 
 pos_target = [
     % 组1 @ z=6m: 方位向紧邻目标对，角度间距 delta_deg
     -6*tand(delta_deg/2),  0,  6;         % 目标1 左
     +6*tand(delta_deg/2),  0,  6;         % 目标2 右
 
-    % 组2 @ z=10m: 十字形4目标（方位向+距离向各一对）
+    % 组2 @ z=10m: 5点十字（左右上下+中心）
     -10*tand(delta_deg/2), 0, 10;         % 目标3 十字左（方位向）
     +10*tand(delta_deg/2), 0, 10;         % 目标4 十字右（方位向）
-    0,                     0, 10-dr_m/2;  % 目标5 十字上（距离向）
-    0,                     0, 10+dr_m/2;  % 目标6 十字下（距离向）
+    0,                     0, 10-dr_m/2; % 目标5 十字上（距离向）
+    0,                     0, 10+dr_m/2; % 目标6 十字下（距离向）
+    0,                     0, 10;         % 目标7 十字中心
 
-    % 孤立参考目标 @ z=8m, 方位角5° (减小大角度坐标系误差)
-    8*tand(5),             0,  8;         % 目标7
+    % 孤立参考目标 @ z=8m, 方位角5°
+    8*tand(5),             0,  8;         % 目标8
 ];
 
-amp_target = [1; 1; 1; 1; 1; 1; 2];  % T7(孤立目标) 幅度×2 补偿az=5°处增益衰减
+amp_target = [1; 1; 1; 1; 1; 1; 1; 3];  % T8(孤立目标) 幅度×3
 
-fprintf('目标定义: bw=%.3f°, delta=%.3f° (%.0f%% BW), 7个目标\n', ...
+fprintf('目标定义: bw=%.3f°, delta=%.3f° (%.0f%% BW), 8个目标\n', ...
     bw_deg, delta_deg, delta_deg/bw_deg*100);
 
 
@@ -152,10 +153,10 @@ hold on;
 plot(0, 0, 'rp', 'MarkerFaceColor', 'r', 'MarkerSize', 12);
 grid on; set(gca, 'YDir', 'reverse');
 xlabel('方位角 [°]'); ylabel('距离 [m]');
-title(sprintf('7目标场景: delta=%.3f° (bw=%.3f°)', delta_deg, bw_deg));
+title(sprintf('8目标场景: delta=%.3f° (bw=%.3f°)', delta_deg, bw_deg));
 xlim([-2, 12]); ylim([5, 11]);
 text(tgt_az_preview+0.1, tgt_r_preview, ...
-    {'T1','T2','T3','T4','T5','T6','T7'}, 'FontSize', 10, 'Color', 'k');
+    {'T1','T2','T3','T4','T5','T6','T7','T8'}, 'FontSize', 10, 'Color', 'k');
 drawnow;
 
 
@@ -264,7 +265,7 @@ sca = uff.sector_scan('azimuth_axis', azimuth_axis, 'depth_axis', depth_axis);
 % 以及*channel_data*和*scan*。
 
 %% ========================================================================
-%  多算法波束形成 (CBF & MVDR) - 最终修正版
+%  波束形成 (CBF) + FISTA 稀疏去卷积
 % ========================================================================
 
 % 初始化管道
@@ -283,46 +284,6 @@ disp('正在执行 CBF (DAS) 波束形成...');
 proc_cbf = midprocess.das();
 b_data_cbf = pipe.go({proc_cbf});
 
-% -------------------------------------------------------------------------
-% 2. 自适应波束形成 (MVDR / Capon)
-% -------------------------------------------------------------------------
-disp('正在执行 MVDR (Capon) 预处理...');
-
-% [关键步骤 A] 预波束形成 (Pre-beamforming)
-% 我们需要先用 DAS 计算延时(Focusing)，但保留接收通道的数据不求和。
-% 这样 Capon 才能拿到每个像素点对应的、已对齐的通道数据来计算权重。
-proc_pre = midprocess.das();
-% 设置维度为 dimension.transmit (仅发射求和)，这意味着接收通道(Receive)会被保留
-proc_pre.dimension = dimension.transmit; 
-
-% 执行预处理，得到中间数据 (Pixels x Channels)
-b_data_pre = pipe.go({proc_pre});
-
-disp('正在执行 MVDR (Capon) 核心计算...');
-disp('注意：计算涉及矩阵求逆，速度较慢，请耐心等待...');
-
-% [关键步骤 B] 调用 Capon 后处理
-mvdr = postprocess.capon_minimum_variance();
-mvdr.dimension = dimension.receive;  % 在接收维上进行自适应加权
-mvdr.channel_data = channel_data;    % 提供探头几何信息
-mvdr.scan = sca;
-
-% 设置 MVDR 参数
-% L_elements: 子阵列长度 (Subarray size)。通常取阵元数的一半左右。
-% 这里的 probe.N 是 128，我们设为 64。较小的值计算快但分辨率低，较大的值分辨率高但更慢且不稳定。
-mvdr.L_elements = channel_data.probe.N / 2; 
-
-% K_in_lambda: 时间平均平滑因子 (Temporal averaging)
-mvdr.K_in_lambda = 1.5; 
-
-% regCoef: 对角加载系数 (正则化)，防止矩阵不可逆
-mvdr.regCoef = 1e-2;
-
-% [核心修正] 将预处理后的"聚焦数据"喂给 MVDR
-mvdr.input = b_data_pre; 
-
-% 执行 MVDR
-b_data_mvdr = mvdr.go();
 
 
 %% ========================================================================
@@ -451,7 +412,7 @@ PSF_pad = circshift(PSF_pad, [-floor(Np_r/2), -floor(Np_a/2)]);
 %   3. 目标函数历史记录              (EMBED info.obj)
 %   4. 耗时统计                      (EMBED info.time)
 
-lambda_fista   = 0.008;  % L1 正则化强度 (适中阈值，使弱目标T7通过阈值)
+lambda_fista   = 0.005;  % L1 正则化强度 (使弱目标T8通过阈值)
 max_iter_fista = 500;    % 最大迭代次数 (增加迭代使充分收敛)
 
 % 预计算填充后 PSF 的 FFT 及伴随 FFT
@@ -536,11 +497,7 @@ disp('FISTA 去卷积完成!');
 
 
 %% ========================================================================
-%  三路算法对比可视化: CBF / MVDR / CBF+FISTA
-%  【修正】三幅图全部使用 imagesc(az_deg, depth_axis, ...) 统一坐标系.
-%  原来 b_data.plot() 的 X 轴是物理坐标 (单位: 米), 而 FISTA 的 imagesc
-%  X 轴是方位角 (单位: 度), 两者完全不同 → 坐标系混用导致图像错位.
-%  改为从 USTB 数据对象中提取 [N_d × N_a] 矩阵后统一用 imagesc 渲染.
+%  双路算法对比可视化: CBF / CBF+FISTA
 % ========================================================================
 
 az_deg = azimuth_axis * (180 / pi);
@@ -548,21 +505,6 @@ az_deg = azimuth_axis * (180 / pi);
 %% 提取 CBF 图像 (复用 Step 1 中的 cbf_img, 已是 [N_d × N_a] 归一化包络)
 cbf_db_vis = 20 * log10(cbf_img + eps);
 cbf_db_vis = max(cbf_db_vis, -60);
-
-%% 提取 MVDR 图像 (从 USTB b_data_mvdr 中读取, 与 CBF 相同格式处理)
-raw_mvdr = b_data_mvdr.data;
-sz_m     = size(raw_mvdr);
-if sz_m(1) == N_d && (numel(sz_m) < 2 || sz_m(2) == N_a)
-    mvdr_env = squeeze(double(abs(raw_mvdr)));
-elseif sz_m(1) == N_d * N_a
-    mvdr_env = reshape(abs(double(raw_mvdr(:, 1))), N_d, N_a);
-else
-    mvdr_env = squeeze(double(abs(raw_mvdr(:, :, 1))));
-end
-if ~ismatrix(mvdr_env); mvdr_env = mvdr_env(:, :, 1); end
-mvdr_img    = mvdr_env / (max(mvdr_env(:)) + eps);
-mvdr_db_vis = 20 * log10(mvdr_img + eps);
-mvdr_db_vis = max(mvdr_db_vis, -60);
 
 %% FISTA 结果转 dB
 fista_db = 20 * log10(img_fista / (max(img_fista(:)) + eps) + eps);
@@ -573,16 +515,16 @@ az_lim    = [-1.5, 11.5];
 depth_lim = [4.5, 11.5];
 
 % 目标理论方位角与距离 (用于在图像上标注)
-tgt_az = [-delta_deg/2,  delta_deg/2, ...        % 组1 @ z=6m
-          -delta_deg/2,  delta_deg/2, 0, 0, ...  % 组2十字 @ z=10m
-          5];                                      % 孤立目标T7 @ az=5°
-tgt_r  = [6, 6, 10, 10, 10-dr_m/2, 10+dr_m/2, 8];
+tgt_az = [-delta_deg/2,  delta_deg/2, ...             % 组1 @ z=6m (T1,T2)
+          -delta_deg/2,  delta_deg/2, 0, 0, 0, ...    % 组2十字 @ z=10m (T3-T7)
+          5];                                           % 孤立目标T8 @ az=5°
+tgt_r  = [6, 6, 10, 10, 10-dr_m/2, 10+dr_m/2, 10, 8];
 
-fig_cmp = figure('Name', 'FLS成像算法三路对比 (CBF / MVDR / FISTA)', ...
-                 'Position', [50, 50, 1800, 600], 'Color', 'w');
+fig_cmp = figure('Name', 'FLS成像算法双路对比 (CBF / FISTA)', ...
+                 'Position', [50, 50, 1200, 600], 'Color', 'w');
 
 % --- 子图 1: CBF / DAS ---
-ax1 = subplot(1, 3, 1);
+ax1 = subplot(1, 2, 1);
 imagesc(az_deg, depth_axis, cbf_db_vis);
 colormap(ax1, hot); clim([-60 0]); colorbar;
 hold on;
@@ -592,39 +534,27 @@ title('CBF / DAS  (常规波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
 set(ax1, 'XLim', az_lim, 'YLim', depth_lim);
 
-% --- 子图 2: MVDR / Capon ---
-ax2 = subplot(1, 3, 2);
-imagesc(az_deg, depth_axis, mvdr_db_vis);
-colormap(ax2, hot); clim([-60 0]); colorbar;
-hold on;
-plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 8, 'LineWidth', 1.2);
-hold off;
-title('MVDR / Capon  (自适应波束形成)', 'FontSize', 13, 'FontWeight', 'bold');
-xlabel('方位角 [°]'); ylabel('深度 [m]');
-set(ax2, 'XLim', az_lim, 'YLim', depth_lim);
-
-% --- 子图 3: CBF + FISTA 去卷积 ---
-ax3 = subplot(1, 3, 3);
+% --- 子图 2: CBF + FISTA 去卷积 ---
+ax2 = subplot(1, 2, 2);
 imagesc(az_deg, depth_axis, fista_db);
-colormap(ax3, hot); clim([-60 0]); colorbar;
+colormap(ax2, hot); clim([-60 0]); colorbar;
 hold on;
 plot(tgt_az, tgt_r, 'c+', 'MarkerSize', 8, 'LineWidth', 1.2);
 hold off;
 title('CBF + FISTA 去卷积  (稀疏正则化)', 'FontSize', 13, 'FontWeight', 'bold');
 xlabel('方位角 [°]'); ylabel('深度 [m]');
-set(ax3, 'XLim', az_lim, 'YLim', depth_lim);
+set(ax2, 'XLim', az_lim, 'YLim', depth_lim);
 
-% 联动三轴
-linkaxes([ax1, ax2, ax3], 'xy');
+% 联动双轴
+linkaxes([ax1, ax2], 'xy');
 
-sgtitle(sprintf('FLS成像算法对比 — 7目标场景\n紧邻目标角度间距=%.3f° (%.1f×CBF 3dB宽度=%.3f°)\nCBF无法分辨 | MVDR边缘改善 | FISTA完全分辨', ...
+sgtitle(sprintf('FLS成像算法对比 — 8目标场景\n紧邻目标角度间距=%.3f° (%.1f×CBF 3dB宽度=%.3f°)\nCBF无法分辨 | FISTA完全分辨', ...
     delta_deg, delta_deg/bw_deg, bw_deg), ...
     'FontSize', 13, 'FontWeight', 'bold');
 drawnow;
 
-fprintf('\n=== 前视声纳三路算法对比完成 ===\n');
+fprintf('\n=== 前视声纳双路算法对比完成 ===\n');
 fprintf('  %-12s 旁瓣高, 分辨率受限于阵列孔径\n', 'CBF / DAS:');
-fprintf('  %-12s 自适应抑制旁瓣, 近场效果好, 计算量大\n', 'MVDR:');
 fprintf('  %-12s 稀疏去卷积, 主瓣最窄, 目标定位精度最高\n', 'FISTA:');
 
 disp('算法对比完成！');
