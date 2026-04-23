@@ -120,7 +120,7 @@ xdc_center_focus(Rh, [0 0 0]);
 bw_deg    = 0.886 * (180/pi) * lambda / (probe.N * probe.pitch) * 1.68;
 delta_deg = 1.0 * bw_deg;   % 临界角度间距: 100% BW (Rayleigh准则边界)
 
-dr_m = 3 * c0 / (2 * BW);   % 3倍距离分辨率 ≈ 22.5 mm (组2距离向间距)
+dr_m = 8 * c0 / (2 * BW);   % 8倍距离分辨率 ≈ 60 mm (组2距离向间距，约12px可分辨)
 
 pos_target = [
     % 组1 @ z=6m: 方位向紧邻目标对，角度间距 delta_deg
@@ -134,11 +134,11 @@ pos_target = [
     0,                     0, 10+dr_m/2; % 目标6 十字下（距离向）
     0,                     0, 10;         % 目标7 十字中心
 
-    % 孤立参考目标 @ z=8m, 方位角5°
-    8*tand(5),             0,  8;         % 目标8
+    % 孤立参考目标 @ z=8m, 正前方 az=0°（消除大角度旁瓣误判）
+    0,                     0,  8;         % 目标8
 ];
 
-amp_target = [1; 1; 1; 1; 1; 1; 1; 3];  % T8(孤立目标) 幅度×3
+amp_target = ones(8, 1);  % 正前方无增益损失，无需补偿
 
 fprintf('目标定义: bw=%.3f°, delta=%.3f° (%.0f%% BW), 8个目标\n', ...
     bw_deg, delta_deg, delta_deg/bw_deg*100);
@@ -253,7 +253,7 @@ channel_data.data = CPW ./ max(CPW(:));  % 归一化
 % 扫描区域定义为覆盖感兴趣区域的像素集合。
 % 这里使用*sector_scan*结构,用方位角和深度定义。
 
-depth_axis   = linspace(4.5, 11.5, 512)';            % 深度轴: 4.5-11.5m, 512点
+depth_axis   = linspace(4.5, 11.5, 1400)';           % 深度轴: 4.5-11.5m, 1400点 (步长≈5mm)
 azimuth_axis = linspace(-3, 13, 1024) / 180 * pi;   % 方位轴: -3°~13°, 1024点
 
 sca = uff.sector_scan('azimuth_axis', azimuth_axis, 'depth_axis', depth_axis);
@@ -331,12 +331,12 @@ az_deg = azimuth_axis * (180 / pi);
 %% Step 2: 估计系统点扩散函数 (PSF)
 % PSF 由阵列方向图 (方位向) 和脉冲带宽 (距离向) 共同决定
 
-% --- 方位向 PSF: 从孤立目标 T5 (z=8m, az=10°) 实测 ---
+% --- 方位向 PSF: 从孤立目标 T8 (z=8m, az=0°) 实测 ---
 az_step_rad = (azimuth_axis(end) - azimuth_axis(1)) / (N_a - 1);
 
-% 找孤立目标 T5 在图像中的像素位置 (z=8m, az=10°，与待分辨目标无重叠)
+% 找孤立目标 T8 在图像中的像素位置 (z=8m, az=0°，正前方无旁瓣误判)
 [~, idx_r_t5] = min(abs(depth_axis - 8.0));
-[~, idx_a_t5] = min(abs(az_deg - 10.0));
+[~, idx_a_t5] = min(abs(az_deg - 0.0));
 % 提取以 T5 为中心的局部方位向剖面（避免远端目标污染）
 half_range = 50;
 col_start = max(1, idx_a_t5 - half_range);
@@ -517,7 +517,7 @@ depth_lim = [4.5, 11.5];
 % 目标理论方位角与距离 (用于在图像上标注)
 tgt_az = [-delta_deg/2,  delta_deg/2, ...             % 组1 @ z=6m (T1,T2)
           -delta_deg/2,  delta_deg/2, 0, 0, 0, ...    % 组2十字 @ z=10m (T3-T7)
-          5];                                           % 孤立目标T8 @ az=5°
+          0];                                           % 孤立目标T8 @ az=0°
 tgt_r  = [6, 6, 10, 10, 10-dr_m/2, 10+dr_m/2, 10, 8];
 
 fig_cmp = figure('Name', 'FLS成像算法双路对比 (CBF / FISTA)', ...
